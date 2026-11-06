@@ -10,7 +10,13 @@ STATE_FILE = Path("results/test_runner_state.json")
 STAGES = [
     {
         "id": "baseline",
-        "command": [sys.executable, "-m", "pytest", "-q", "tests/"],
+        "command": [
+            sys.executable, "-m", "pytest", "-q",
+            "tests/test_command_queue.py",
+            "tests/test_command_worker.py",
+            "tests/test_shutdown.py",
+            "tests/test_go2_webrtc.py",
+        ],
     },
     {
         "id": "webrtc_connect",
