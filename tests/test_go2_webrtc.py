@@ -235,3 +235,145 @@ def test_send_request_cancellation_sets_error(monkeypatch):
                 )
 
     asyncio.run(scenario())
+
+
+def test_disconnect_success():
+    from types import SimpleNamespace
+
+    calls = []
+
+    async def mock_disconnect():
+        calls.append("disconnect")
+
+    adapter = gw.Go2WebRTC()
+    adapter.state = "CONNECTED"
+    adapter.connection = SimpleNamespace(
+        disconnect=mock_disconnect,
+    )
+
+    asyncio.run(adapter.disconnect())
+
+    assert calls == ["disconnect"]
+    assert adapter.state == "DISCONNECTED"
+    assert adapter.connection is None
+
+
+def test_disconnect_connection_error():
+    from types import SimpleNamespace
+
+    async def mock_disconnect():
+        raise ConnectionError("Simulated disconnect failure")
+
+    adapter = gw.Go2WebRTC()
+    adapter.state = "CONNECTED"
+    adapter.connection = SimpleNamespace(
+        disconnect=mock_disconnect,
+    )
+
+    with pytest.raises(ConnectionError):
+        asyncio.run(adapter.disconnect())
+
+    assert adapter.state == "ERROR"
+    assert adapter.connection is not None
+
+
+def test_disconnect_timeout(monkeypatch):
+    from types import SimpleNamespace
+
+    async def mock_disconnect():
+        raise asyncio.TimeoutError("Simulated disconnect timeout")
+
+    adapter = gw.Go2WebRTC()
+    adapter.state = "CONNECTED"
+    adapter.connection = SimpleNamespace(
+        disconnect=mock_disconnect,
+    )
+
+    with pytest.raises(asyncio.TimeoutError):
+        asyncio.run(adapter.disconnect())
+
+    assert adapter.state == "ERROR"
+    assert adapter.connection is not None
+
+
+def test_disconnect_timeout_enforced(monkeypatch):
+    from types import SimpleNamespace
+
+    calls = []
+    original_wait_for = asyncio.wait_for
+
+    async def mock_wait_for(awaitable, timeout):
+        calls.append(timeout)
+        if hasattr(awaitable, "close"):
+            awaitable.close()
+        raise asyncio.TimeoutError("Simulated deadline exceeded")
+
+    async def mock_disconnect():
+        raise AssertionError("Should not execute")
+
+    adapter = gw.Go2WebRTC()
+    adapter.state = "CONNECTED"
+    adapter.connection = SimpleNamespace(
+        disconnect=mock_disconnect,
+    )
+
+    monkeypatch.setattr(gw.asyncio, "wait_for", mock_wait_for)
+
+    with pytest.raises(asyncio.TimeoutError):
+        asyncio.run(adapter.disconnect())
+
+    assert calls == [5.0]
+    assert adapter.state == "ERROR"
+    assert adapter.connection is not None
+
+
+def test_disconnect_cancellation():
+    from types import SimpleNamespace
+
+    started = asyncio.Event()
+
+    async def mock_disconnect():
+        started.set()
+        await asyncio.sleep(10)
+
+    adapter = gw.Go2WebRTC()
+    adapter.state = "CONNECTED"
+    adapter.connection = SimpleNamespace(
+        disconnect=mock_disconnect,
+    )
+
+    async def scenario():
+        task = asyncio.create_task(adapter.disconnect())
+
+        try:
+            await asyncio.wait_for(started.wait(), timeout=1.0)
+            task.cancel()
+
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+            assert adapter.state == "ERROR"
+            assert adapter.connection is not None
+
+        finally:
+            if not task.done():
+                task.cancel()
+                await asyncio.gather(
+                    task,
+                    return_exceptions=True,
+                )
+
+    asyncio.run(scenario())
+
+
+def test_disconnect_idempotent():
+    adapter = gw.Go2WebRTC()
+
+    assert adapter.state == "DISCONNECTED"
+    assert adapter.connection is None
+
+    asyncio.run(adapter.disconnect())
+    asyncio.run(adapter.disconnect())
+
+    assert adapter.state == "DISCONNECTED"
+    assert adapter.connection is None
