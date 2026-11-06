@@ -32,6 +32,13 @@ STAGES = [
             "tests/test_shutdown_inflight.py",
         ],
     },
+    {
+        "id": "watchdog",
+        "command": [
+            sys.executable, "-m", "pytest", "-q",
+            "tests/test_watchdog.py",
+        ],
+    },
 ]
 
 

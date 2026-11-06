@@ -130,3 +130,75 @@ def test_fault_recovery_requires_authorization():
     assert not queue.recovery_authorized
 
     assert queue.submit(0.1, 0.0) is not None
+
+
+def test_recovery_blocked_while_stop_in_progress():
+    queue = CommandQueue()
+    queue.set_fault()
+
+    assert queue.submit(0.0, 0.0) is not None
+    command = queue.take()
+
+    assert command[1:] == (0.0, 0.0)
+    assert queue.stop_in_progress
+
+    assert not queue.recovery_ready()
+    assert not queue.authorize_recovery()
+    assert not queue.clear_fault()
+    assert queue.fault
+    assert queue.submit(0.1, 0.0) is None
+
+    queue.finish_stop()
+
+    assert queue.recovery_ready()
+    assert queue.authorize_recovery()
+    assert queue.clear_fault()
+    assert not queue.fault
+
+
+def test_recovery_blocked_while_stop_in_progress():
+    queue = CommandQueue()
+    queue.set_fault()
+
+    assert queue.submit(0.0, 0.0) is not None
+    command = queue.take()
+
+    assert command[1:] == (0.0, 0.0)
+    assert queue.stop_in_progress
+
+    assert not queue.recovery_ready()
+    assert not queue.authorize_recovery()
+    assert not queue.clear_fault()
+    assert queue.fault
+    assert queue.submit(0.1, 0.0) is None
+
+    queue.finish_stop()
+
+    assert queue.recovery_ready()
+    assert queue.authorize_recovery()
+    assert queue.clear_fault()
+    assert not queue.fault
+
+
+def test_recovery_blocked_while_stop_in_progress():
+    queue = CommandQueue()
+    queue.set_fault()
+
+    assert queue.submit(0.0, 0.0) is not None
+    command = queue.take()
+
+    assert command[1:] == (0.0, 0.0)
+    assert queue.stop_in_progress
+
+    assert not queue.recovery_ready()
+    assert not queue.authorize_recovery()
+    assert not queue.clear_fault()
+    assert queue.fault
+    assert queue.submit(0.1, 0.0) is None
+
+    queue.finish_stop()
+
+    assert queue.recovery_ready()
+    assert queue.authorize_recovery()
+    assert queue.clear_fault()
+    assert not queue.fault
