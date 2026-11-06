@@ -25,6 +25,13 @@ STAGES = [
             "tests/test_go2_connect.py",
         ],
     },
+    {
+        "id": "shutdown_inflight",
+        "command": [
+            sys.executable, "-m", "pytest", "-q",
+            "tests/test_shutdown_inflight.py",
+        ],
+    },
 ]
 
 
