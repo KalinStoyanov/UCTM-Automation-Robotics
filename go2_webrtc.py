@@ -86,15 +86,24 @@ class Go2WebRTC:
             raise RuntimeError("WebRTC transport is not connected")
 
         if not self.channel_ready():
+            self.state = "ERROR"
             raise RuntimeError("WebRTC DataChannel is not ready")
 
-        return await asyncio.wait_for(
-            self.connection.datachannel.pub_sub.publish_request_new(
-                request["topic"],
-                request["options"],
-            ),
-            timeout=2.0,
-        )
+        try:
+            return await asyncio.wait_for(
+                self.connection.datachannel.pub_sub.publish_request_new(
+                    request["topic"],
+                    request["options"],
+                ),
+                timeout=2.0,
+            )
+        except (
+            asyncio.TimeoutError,
+            asyncio.CancelledError,
+            ConnectionError,
+        ):
+            self.state = "ERROR"
+            raise
 
     async def send_move(self, vx=0.0, vy=0.0, wz=0.0):
         request = make_move(vx, vy, wz)
