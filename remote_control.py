@@ -3,7 +3,8 @@ import asyncio
 import time
 
 from go2_transport import make_move, make_stop
-from go2_webrtc import Go2WebRTC, LIVE_ENABLED
+import go2_webrtc as transport
+from go2_webrtc import Go2WebRTC
 
 from prompt_toolkit import Application
 from prompt_toolkit.key_binding import KeyBindings
@@ -31,7 +32,7 @@ measured_wz = None
 
 async def dispatch_command(linear, angular):
     """Prepare or transmit a velocity command."""
-    if not LIVE_ENABLED:
+    if not transport.LIVE_ENABLED:
         if linear == 0.0 and angular == 0.0:
             return make_stop()
         return make_move(linear, 0.0, angular)
@@ -177,7 +178,7 @@ async def command_worker():
 
 def schedule_command(linear, angular):
     """Submit the latest command to the sequential worker."""
-    if LIVE_ENABLED:
+    if transport.LIVE_ENABLED:
         raise RuntimeError(
             "LIVE keyboard dispatch is not enabled"
         )

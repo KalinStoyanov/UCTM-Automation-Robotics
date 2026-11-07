@@ -39,6 +39,13 @@ STAGES = [
             "tests/test_watchdog.py",
         ],
     },
+    {
+        "id": "live_mode_guard",
+        "command": [
+            sys.executable, "-m", "pytest", "-q",
+            "tests/test_live_mode_guard.py",
+        ],
+    },
 ]
 
 
