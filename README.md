@@ -1,44 +1,41 @@
-# UCTM Automation-Robotics
+# UCTM Automation & Robotics
 
-Robotics, automation, autonomous systems, and artificial intelligence research at the University of Chemical Technology and Metallurgy (UCTM), Sofia.
+Robotics, automation and artificial intelligence research
+at the University of Chemical Technology and Metallurgy,
+Sofia, Bulgaria.
 
-## Project scope
+## Repository architecture
 
-This repository is intended to support the development and experimental validation of robotic systems, including:
+### 1. Poppy
+Poppy Humanoid / D2 Mark 1 development.
 
-- Robot communication and remote control
-- Safety supervision and watchdog mechanisms
-- Sensor integration and telemetry
-- Computer vision and perception
-- Artificial intelligence and machine learning
-- Autonomous navigation and behavior
-- Simulation, testing, and experimental evaluation
+Status: Paused. Development will resume later.
 
-## Initial robotic platform
+### 2. Go2
+Unitree Go2 Air and DDStation development.
 
-Unitree Go2 Air
+Components:
+- Python robot control
+- WebRTC communication
+- Motion and safety control
+- DD-M2 AI applications
+- Camera and gesture recognition
+- Simulation and automated tests
 
-## Current development status
+Status: Active development.
 
-The initial DDStation software has been developed and validated through 48 offline tests.
+The operational development installation is located at
+`~/go2` on DDStation.
 
-The software includes WebRTC communication support, keyboard-based remote control, command handling, safety mechanisms, and automated tests.
+### 3. Multi-Robot
+Future multi-robot coordination and AI agent systems.
 
-Integration with the physical robot remains pending.
+Status: Planned.
 
-## Development principles
+## Repository policy
 
-- Modular software architecture
-- Reproducible experiments
-- Automated testing
-- Safety-first robot control
-- Version-controlled development
-- Clear separation between verified functionality and planned capabilities
+Each project maintains its own source code,
+dependencies, tests and documentation.
 
-## Repository status
-
-Initial development baseline: `ddstation-ready-v1`
-
-## Future development
-
-The project will progressively incorporate robot telemetry, sensor processing, computer vision, AI models, and autonomous robotic behaviors.
+The Git history and historical development tags
+are preserved.
