@@ -1,0 +1,30 @@
+{
+  "milestone": "M24-A",
+  "mode": "OFFLINE",
+  "live_enabled": false,
+  "results": {
+    "A14_initialization": "PASS",
+    "A15_topics": "PASS",
+    "A16_callbacks": "PASS",
+    "A17_live_guard": "PASS",
+    "A18_disconnect": "PASS"
+  },
+  "snapshot": {
+    "state": "DISCONNECTED",
+    "subscribed": false,
+    "counts": {
+      "rt/sportmodestate": 1,
+      "rt/lf/lowstate": 1,
+      "rt/lf/bmsstate": 1,
+      "rt/lf/mainboardstate": 1,
+      "rt/lf/sportmodestate": 1
+    },
+    "topics": {
+      "SPORT_MOD_STATE": "rt/sportmodestate",
+      "LOW_STATE": "rt/lf/lowstate",
+      "BMS_STATE": "rt/lf/bmsstate",
+      "MAIN_BOARD_STATE": "rt/lf/mainboardstate",
+      "LF_SPORT_MOD_STATE": "rt/lf/sportmodestate"
+    }
+  }
+}
