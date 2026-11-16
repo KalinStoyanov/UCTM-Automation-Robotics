@@ -24,3 +24,33 @@ htmlcov/
 .DS_Store
 
 results/
+
+# DD-M2 local files
+__pycache__/
+.pytest_cache/
+*.pyc
+*.bak*
+ddm2-ai/
+applications/dd-m2/models/
+applications/dd-m2/data/
+applications/dd-m2/results/
+applications/dd-m2/tmp/
+applications/dd-m2/test_images/
+*.pt
+
+# Additional local environments
+.venv-*/
+.pip-tmp/
+
+# Local model symlinks and weights
+/models
+*.onnx
+
+# Temporary runtime files
+self.command_timeout
+
+# Development backups
+*.save
+*.bak_*
+*_backup
+*_backup.*

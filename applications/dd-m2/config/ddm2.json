@@ -1,0 +1,23 @@
+{
+  "robot": {
+    "model": "Unitree Go2 Air",
+    "mode": "SIMULATION",
+    "motion_enabled": false
+  },
+  "network": {
+    "connection": "WebRTC",
+    "robot_ip": null,
+    "wifi_configured": false
+  },
+  "gesture": {
+    "recognizer_model": "models/gesture_recognizer.task",
+    "required_confirmations": 3,
+    "timeout_s": 0.5,
+    "fps": 30
+  },
+  "motion": {
+    "linear_speed_m_s": 0.2,
+    "angular_speed_rad_s": 0.5,
+    "turn_angle_deg": 90
+  }
+}

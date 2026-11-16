@@ -1,0 +1,25 @@
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+ddm2-ai/
+*.egg-info/
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Generated files
+*.log
+*.bak*
+results/
+outputs/
+
+# Large local media
+data/videos/
