@@ -1,6 +1,7 @@
 import math
 import asyncio
 import time
+import os
 
 from core.communication.go2_transport import make_move, make_stop
 from core.communication import go2_webrtc as transport
@@ -12,9 +13,10 @@ from prompt_toolkit.layout import Layout, Window
 from prompt_toolkit.layout.controls import FormattedTextControl
 
 
-WATCHDOG_TIMEOUT = 0.5
-MAX_LINEAR_SPEED = 0.20    # m/s
-MAX_ANGULAR_SPEED = 0.30   # rad/s
+LIVE_MANUAL = os.environ.get("DDM2_LIVE_MANUAL") == "1"
+WATCHDOG_TIMEOUT = 0.25
+MAX_LINEAR_SPEED = 0.10 if LIVE_MANUAL else 0.20
+MAX_ANGULAR_SPEED = 0.20 if LIVE_MANUAL else 0.30
 
 kb = KeyBindings()
 webrtc = Go2WebRTC()
@@ -38,9 +40,18 @@ async def dispatch_command(linear, angular):
         return make_move(linear, 0.0, angular)
 
     if linear == 0.0 and angular == 0.0:
-        return await webrtc.stop()
+        response = await webrtc.stop()
+    else:
+        response = await webrtc.send_move(linear, 0.0, angular)
 
-    return await webrtc.send_move(linear, 0.0, angular)
+    code = response.get("data", {}).get(
+        "header", {}
+    ).get("status", {}).get("code")
+
+    if code != 0:
+        raise RuntimeError(f"Robot command status: {code}")
+
+    return response
 
 
 class CommandQueue:
@@ -233,6 +244,9 @@ def guarded_submit(linear, angular):
 
 async def obstacle_monitor():
     """Monitor last accepted motion after its dispatch."""
+    if LIVE_MANUAL:
+        return
+
     while True:
         await asyncio.sleep(0.02)
         linear, angular = active_velocity
@@ -251,6 +265,7 @@ async def command_worker():
     """Execute queued commands sequentially."""
     global active_velocity, active_dispatch_task
     global stop_confirmed
+    global vx, wz, status, last_motion_input
     while True:
         command = command_queue.take()
 
@@ -263,8 +278,10 @@ async def command_worker():
 
         try:
             if not is_stop:
-                if obstacle_latched or not obstacle_safety.safe(
-                    linear, 0.0, angular
+                if not LIVE_MANUAL and (
+                    obstacle_latched or not obstacle_safety.safe(
+                        linear, 0.0, angular
+                    )
                 ):
                     obstacle_stop(
                         "STOPPED_OBSTACLE"
@@ -299,10 +316,25 @@ async def command_worker():
 
         except Exception as exc:
             command_queue.set_fault()
-            print(
-                f"Command {sequence} failed: {exc}"
-            )
+            active_velocity = (0.0, 0.0)
+            vx = 0.0
+            wz = 0.0
+            last_motion_input = None
+            status = "FAULT"
+
+            print(f"Command {sequence} failed: {exc}")
             print("FAULT: movement commands blocked")
+
+            if transport.LIVE_ENABLED and webrtc.channel_ready():
+                try:
+                    await asyncio.wait_for(
+                        webrtc.stop(), timeout=1.0
+                    )
+                    print("FAULT STOP: request completed")
+                except Exception as stop_exc:
+                    print(f"FAULT STOP FAILED: {stop_exc}")
+
+            app.invalidate()
 
         finally:
             if is_stop:
@@ -311,6 +343,9 @@ async def command_worker():
 
 def schedule_command(linear, angular):
     """Submit the latest command to the sequential worker."""
+    if LIVE_MANUAL:
+        return command_queue.submit(linear, angular)
+
     if transport.LIVE_ENABLED:
         raise RuntimeError(
             "LIVE keyboard dispatch is not enabled"
@@ -412,7 +447,7 @@ def format_angular(value):
 def screen():
     return (
         "UNITREE GO2 AIR - REMOTE CONTROL\n"
-        "MODE: SIMULATION\n\n"
+        f"MODE: {'LIVE_MANUAL' if LIVE_MANUAL else 'SIMULATION'}\n\n"
         "UP: Forward       DOWN: Backward\n"
         "LEFT: Turn left   RIGHT: Turn right\n"
         "0 / Space: Stop   Esc: Exit\n\n"
@@ -428,10 +463,12 @@ def screen():
         f"Lateral velocity: {format_linear(measured_vy)}\n"
         f"Turning velocity: {format_angular(measured_wz)}\n\n"
 
-        "Watchdog timeout: 0.5 s\n"
+        f"Watchdog timeout: {WATCHDOG_TIMEOUT:.2f} s\n"
         f"Transport API: "
         f"{last_transport_request['options']['api_id'] if last_transport_request else 'N/A'}\n"
-        "No commands are sent to the robot."
+        + ("WARNING: NO ACTIVE LIDAR OBSTACLE PROTECTION"
+         if LIVE_MANUAL else
+         "No commands are sent to the robot.")
     )
 
 app = Application(
@@ -442,6 +479,15 @@ app = Application(
 
 
 async def main():
+    if LIVE_MANUAL:
+        transport.LIVE_ENABLED = True
+        await webrtc.connect()
+        try:
+            await dispatch_command(0.0, 0.0)
+        except BaseException:
+            await webrtc.disconnect()
+            raise
+
     watchdog_task = asyncio.create_task(watchdog())
     worker_task = asyncio.create_task(command_worker())
     obstacle_task = asyncio.create_task(obstacle_monitor())
@@ -481,6 +527,9 @@ async def main():
         except Exception as exc:
             command_queue.set_fault()
             print(f"FAULT: final STOP failed: {exc}")
+
+        if LIVE_MANUAL and webrtc.connection is not None:
+            await webrtc.disconnect()
 
 
 if __name__ == "__main__":
