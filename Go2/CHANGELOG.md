@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased — development after v0.25.0
+
+- Experimental LIVE posture control with a shared WebRTC session and standing-centered transitions.
+- Separate diagnostic posture controller with JSONL command/response/observation logs.
+- Unified Go2/DD-M2 system versioning policy covering core, AI modules, safety, experiments and tests.
+- Added build identification by Git commit and dirty working-tree status.
+- LIVE physical posture tests are not yet a validated system release.
+
+
 ## v0.25.0 — M25 Offline Baseline
 
 - WebRTC communication and remote control foundation.
