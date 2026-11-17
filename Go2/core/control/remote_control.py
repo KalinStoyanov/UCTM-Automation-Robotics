@@ -144,9 +144,113 @@ class CommandQueue:
 
 command_queue = CommandQueue()
 
+from core.safety.obstacle import ObstacleSafetyFilter
+
+obstacle_safety = ObstacleSafetyFilter()
+obstacle_latched = False
+active_velocity = (0.0, 0.0)
+active_dispatch_task = None
+stop_generation = 0
+stop_confirmed = False
+
+
+def obstacle_stop(reason="STOPPED_OBSTACLE"):
+    """Latch stop and discard pending movement."""
+    global obstacle_latched, active_velocity, status, vx, wz
+    global stop_generation, stop_confirmed
+
+    stop_confirmed = False
+    stop_generation += 1
+    obstacle_latched = True
+    active_velocity = (0.0, 0.0)
+
+    if active_dispatch_task is not None:
+        if not active_dispatch_task.done():
+            if not command_queue.stop_in_progress:
+                active_dispatch_task.cancel()
+
+    command_queue.pending = None
+
+    if not command_queue.stop_in_progress:
+        command_queue.submit(0.0, 0.0)
+    status = reason
+    vx = 0.0
+    wz = 0.0
+
+
+def observe_obstacle(clearance):
+    """Accept normalized clearance from a future LiDAR adapter."""
+    valid = obstacle_safety.observe(clearance)
+
+    candidates = [active_velocity]
+
+    pending = command_queue.pending
+    if pending is not None:
+        _, linear, angular = pending
+        candidates.append((linear, angular))
+
+    for linear, angular in candidates:
+        if linear == 0.0 and angular == 0.0:
+            continue
+
+        if not obstacle_safety.safe(linear, 0.0, angular):
+            reason = (
+                "STOPPED_OBSTACLE"
+                if obstacle_safety.fresh()
+                else "SENSOR_FAULT"
+            )
+            obstacle_safety.state = reason
+            obstacle_stop(reason)
+            break
+
+    return valid
+
+
+def guarded_submit(linear, angular):
+    """Only a fresh explicit command may release obstacle latch."""
+    global obstacle_latched
+    if linear == 0.0 and angular == 0.0:
+        return command_queue.submit(0.0, 0.0)
+
+    if not obstacle_safety.safe(linear, 0.0, angular):
+        obstacle_stop(
+            "STOPPED_OBSTACLE" if obstacle_safety.fresh()
+            else "SENSOR_FAULT"
+        )
+        return None
+
+    if obstacle_latched:
+        if not stop_confirmed:
+            return None
+        if command_queue.fault or command_queue.stop_in_progress:
+            return None
+        if command_queue.pending is not None:
+            return None
+        obstacle_latched = False
+
+    return command_queue.submit(linear, angular)
+
+
+async def obstacle_monitor():
+    """Monitor last accepted motion after its dispatch."""
+    while True:
+        await asyncio.sleep(0.02)
+        linear, angular = active_velocity
+        if linear == 0.0 and angular == 0.0:
+            continue
+        if not obstacle_safety.safe(linear, 0.0, angular):
+            obstacle_stop(
+                "STOPPED_OBSTACLE" if obstacle_safety.fresh()
+                else "SENSOR_FAULT"
+            )
+
+
+
 
 async def command_worker():
     """Execute queued commands sequentially."""
+    global active_velocity, active_dispatch_task
+    global stop_confirmed
     while True:
         command = command_queue.take()
 
@@ -158,7 +262,36 @@ async def command_worker():
         is_stop = linear == 0.0 and angular == 0.0
 
         try:
-            await dispatch_command(linear, angular)
+            if not is_stop:
+                if obstacle_latched or not obstacle_safety.safe(
+                    linear, 0.0, angular
+                ):
+                    obstacle_stop(
+                        "STOPPED_OBSTACLE"
+                        if obstacle_safety.fresh()
+                        else "SENSOR_FAULT"
+                    )
+                    continue
+                active_velocity = (linear, angular)
+            else:
+                active_velocity = (0.0, 0.0)
+
+            generation = stop_generation
+            active_dispatch_task = asyncio.create_task(
+                dispatch_command(linear, angular)
+            )
+
+            try:
+                await active_dispatch_task
+                if is_stop:
+                    stop_confirmed = True
+            except asyncio.CancelledError:
+                if not is_stop and generation != stop_generation:
+                    continue
+                command_queue.set_fault()
+                raise
+            finally:
+                active_dispatch_task = None
 
         except asyncio.CancelledError:
             command_queue.set_fault()
@@ -183,7 +316,7 @@ def schedule_command(linear, angular):
             "LIVE keyboard dispatch is not enabled"
         )
 
-    return command_queue.submit(linear, angular)
+    return guarded_submit(linear, angular)
 
 
 def update(command, linear, angular, motion=False, dispatch=True):
@@ -207,7 +340,13 @@ def update(command, linear, angular, motion=False, dispatch=True):
         last_motion_input = None
 
     if dispatch:
-        schedule_command(vx, wz)
+        accepted = schedule_command(vx, wz)
+        if accepted is None and (linear != 0.0 or angular != 0.0):
+            vx = 0.0
+            wz = 0.0
+            last_transport_request = make_stop()
+            if obstacle_latched:
+                status = obstacle_safety.state
     app.invalidate()
 
 
@@ -305,16 +444,19 @@ app = Application(
 async def main():
     watchdog_task = asyncio.create_task(watchdog())
     worker_task = asyncio.create_task(command_worker())
+    obstacle_task = asyncio.create_task(obstacle_monitor())
 
     try:
         await app.run_async()
     finally:
         watchdog_task.cancel()
         worker_task.cancel()
+        obstacle_task.cancel()
 
         await asyncio.gather(
             watchdog_task,
             worker_task,
+            obstacle_task,
             return_exceptions=True,
         )
 

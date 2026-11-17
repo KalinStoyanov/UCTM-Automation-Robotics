@@ -1,3 +1,4 @@
+from core.safety.obstacle import Clearance
 import asyncio
 
 import remote_control as rc
@@ -8,6 +9,9 @@ def test_shutdown_cancels_inflight_motion_before_final_stop(monkeypatch):
         events = []
         motion_started = asyncio.Event()
         queue = rc.CommandQueue()
+        rc.obstacle_safety.observe(
+            Clearance(2.0, 2.0, 2.0, 2.0, 2.0)
+        )
 
         class MockApp:
             async def run_async(self):

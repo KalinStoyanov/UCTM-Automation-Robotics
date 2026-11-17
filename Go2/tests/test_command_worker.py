@@ -1,3 +1,4 @@
+from core.safety.obstacle import Clearance
 import asyncio
 
 import remote_control as rc
@@ -6,6 +7,9 @@ import remote_control as rc
 def test_worker_cancellation_activates_fault(monkeypatch):
     async def scenario():
         queue = rc.CommandQueue()
+        rc.obstacle_safety.observe(
+            Clearance(2.0, 2.0, 2.0, 2.0, 2.0)
+        )
         started = asyncio.Event()
 
         async def mock_dispatch(linear, angular):
@@ -52,6 +56,9 @@ def test_worker_cancellation_activates_fault(monkeypatch):
 def test_worker_communication_failure(monkeypatch):
     async def scenario():
         queue = rc.CommandQueue()
+        rc.obstacle_safety.observe(
+            Clearance(2.0, 2.0, 2.0, 2.0, 2.0)
+        )
         events = []
         move_failed = asyncio.Event()
         stop_completed = asyncio.Event()
