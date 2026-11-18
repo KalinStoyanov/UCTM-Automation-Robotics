@@ -56,5 +56,10 @@ class AIExecutionGateway:
         ):
             return self.stop()
 
-        self.executor(0.0, angular)
+        try:
+            self.executor(0.0, angular)
+        except Exception:
+            self.stop_latched = True
+            raise
+
         return "EXECUTED"

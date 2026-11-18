@@ -39,8 +39,13 @@ class AIController:
         return True
 
     def step_offline(self, frame, now):
-        result = self.core.step(frame, now)
-        return self.gateway.execute(result)
+        try:
+            result = self.core.step(frame, now)
+            return self.gateway.execute(result)
+        except Exception:
+            self.core.manual_stop()
+            self.gateway.stop_latched = True
+            return "STOP"
 
 
 def offline_self_test():
