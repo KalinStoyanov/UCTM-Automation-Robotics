@@ -10,8 +10,11 @@ experimental and must be validated on the physical robot.
 LIVE robot commands require supervision and physical pose verification.
 """
 import asyncio
+import json
 import math
 import time
+from datetime import datetime
+from pathlib import Path
 from core.communication import go2_webrtc
 from unitree_webrtc_connect.constants import RTC_TOPIC
 
@@ -25,6 +28,7 @@ class PostureController:
         self.pose = "UNKNOWN"
         self.yaw = None
         self.yaw_updated = 0.0
+        self.turn_samples = None
 
     def on_sport_state(self, message):
         try:
@@ -32,6 +36,8 @@ class PostureController:
             if math.isfinite(yaw):
                 self.yaw = yaw
                 self.yaw_updated = time.monotonic()
+                if self.turn_samples is not None:
+                    self.turn_samples.append((self.yaw_updated, yaw))
         except (KeyError, IndexError, TypeError, ValueError):
             pass
 
@@ -102,12 +108,23 @@ class PostureController:
 
         return False
 
-    async def turn_15(self, direction):
-        """Feedback-controlled 15-degree yaw; stop on fault or timeout.
+    def yaw_snapshot(self, origin, reference=None):
+        now = time.monotonic()
+        fresh = self.yaw_fresh()
+        value = self.yaw if fresh else None
+        degrees = math.degrees(value) if value is not None else None
+        delta = (math.degrees(self.angle_step(reference, value))
+                 if value is not None and reference is not None else None)
+        return {
+            "t_s": round(now - origin, 4),
+            "yaw_deg": round(degrees, 4) if degrees is not None else None,
+            "delta_deg": round(delta, 4) if delta is not None else None,
+            "yaw_age_s": round(now - self.yaw_updated, 4),
+            "fresh": fresh,
+        }
 
-        Direction: +1 = left, -1 = right. Requires a fresh IMU yaw
-        stream and supervised operation on a clear, level floor.
-        """
+    async def turn_15(self, direction):
+        """Feedback-controlled turn with IMU telemetry at command/STOP boundaries."""
         if self.pose != "STANDING":
             print("TURN REJECTED: ROBOT MUST BE STANDING")
             return False
@@ -126,16 +143,26 @@ class PostureController:
             print("TURN REJECTED: NO FRESH IMU YAW")
             return False
 
-        # Small rotational velocity; movement is closed-loop on yaw,
-        # not estimated by elapsed time.
-        yaw_previous = self.yaw
+        origin = time.monotonic()
+        yaw_initial = self.yaw
+        yaw_previous = yaw_initial
         rotated = 0.0
-        target = direction * math.radians(15.0)
-        speed = direction * 0.12  # rad/s (approximately 6.88 deg/s)
-        deadline = time.monotonic() + 5.0
+        speed = direction * 0.12
+        deadline = origin + 5.0
         result = False
         stop_ok = False
+        observations = []
+        events = []
+        self.turn_samples = []
 
+        def snapshot(stage, **fields):
+            state = self.yaw_snapshot(origin, yaw_initial)
+            record = {"stage": stage, **state, **fields}
+            observations.append(record)
+            print("TURN IMU:", json.dumps(record, ensure_ascii=False))
+            return record
+
+        snapshot("BEFORE_MOVE", commanded_wz_rad_s=speed)
         try:
             while time.monotonic() < deadline:
                 if not self.yaw_fresh():
@@ -144,16 +171,19 @@ class PostureController:
                 yaw_current = self.yaw
                 rotated += self.angle_step(yaw_previous, yaw_current)
                 yaw_previous = yaw_current
-
                 if direction * rotated >= math.radians(14.0):
                     result = True
                     break
 
+                snapshot("MOVE_SEND")
+                sent_at = time.monotonic()
                 response = await asyncio.wait_for(
                     self.robot.send_move(0.0, 0.0, speed),
                     timeout=1.5,
                 )
                 code = self.api_code(response)
+                snapshot("MOVE_RESPONSE", code=code,
+                         request_duration_s=round(time.monotonic() - sent_at, 4))
                 if code != 0:
                     print(f"TURN MOVE API RESPONSE: {response!r}")
                     raise RuntimeError(f"TURN Move command rejected (code={code})")
@@ -164,20 +194,52 @@ class PostureController:
 
         except Exception as exc:
             self.pose = "UNKNOWN"
+            events.append(repr(exc))
             print("TURN FAULT:", exc)
 
         finally:
-            # A StopMove request is mandatory, including on failure.
+            snapshot("BEFORE_STOP")
             try:
                 response = await asyncio.wait_for(self.robot.stop(), timeout=1.5)
                 stop_ok = self.api_code(response) == 0
+                snapshot("STOP_RESPONSE", code=self.api_code(response))
                 print("TURN STOP:", self.api_code(response))
             except Exception as exc:
+                self.pose = "UNKNOWN"
+                events.append("STOP: " + repr(exc))
                 print("TURN STOP FAILED:", exc)
             if not stop_ok:
                 self.pose = "UNKNOWN"
 
-        print(f"TURN MEASURED: {math.degrees(rotated):+.1f} deg")
+            # Observe residual movement AFTER sending STOP; do not command motion.
+            await asyncio.sleep(0.30)
+            snapshot("AFTER_STOP_300MS")
+            samples = self.turn_samples or []
+            self.turn_samples = None
+            directory = Path("results")
+            directory.mkdir(exist_ok=True)
+            log_file = directory / "ddm2_turn_diagnostics.jsonl"
+            log_record = {
+                "timestamp": datetime.now().isoformat(timespec="milliseconds"),
+                "direction": "LEFT" if direction > 0 else "RIGHT",
+                "target_deg": 15 * direction,
+                "observations": observations,
+                "imu_samples": [
+                    {"t_s": round(t - origin, 4),
+                     "yaw_deg": round(math.degrees(yaw), 4)}
+                    for t, yaw in samples
+                ],
+                "errors": events,
+                "stop_ok": stop_ok,
+            }
+            try:
+                with log_file.open("a", encoding="utf-8") as file:
+                    file.write(json.dumps(log_record, ensure_ascii=False) + "\n")
+                print("TURN LOG:", log_file)
+            except OSError as exc:
+                print("TURN LOG ERROR:", exc)
+
+        print(f"TURN CONTROL LOOP: {math.degrees(rotated):+.2f} deg")
         return result and stop_ok
 
     async def quit(self):
