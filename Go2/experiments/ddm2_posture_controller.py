@@ -153,8 +153,10 @@ class PostureController:
                     self.robot.send_move(0.0, 0.0, speed),
                     timeout=1.5,
                 )
-                if self.api_code(response) != 0:
-                    raise RuntimeError("TURN Move command rejected")
+                code = self.api_code(response)
+                if code != 0:
+                    print(f"TURN MOVE API RESPONSE: {response!r}")
+                    raise RuntimeError(f"TURN Move command rejected (code={code})")
                 await asyncio.sleep(0.07)
 
             if not result:
