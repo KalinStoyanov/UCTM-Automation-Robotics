@@ -16,7 +16,7 @@ for spec in 'ddm:ddm2_manual_control.py' 'dda:ddm2_ai_control.py'; do
 #!/bin/sh
 set -eu
 cd "$ROOT"
-export PYTHONPATH="$ROOT${PYTHONPATH:+:\$PYTHONPATH}"
+export PYTHONPATH="$ROOT"
 export DDM2_LIVE_MANUAL=1
 exec "$VENV_PY" "$ROOT/experiments/$script" "\$@"
 EOF
