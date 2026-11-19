@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased — integrated Go2 control snapshot (go2-control; recorded 2026-11-19)
+## v0.26.0 — Integrated Go2 Control (2026-11-19)
 
 **Operator-reported hardware status:** basic controller and AI controller tested on the physical Unitree Go2 Air; integration considered complete for the current demonstration scope. This is a documentation and version-control record, not a claim that tests were rerun as part of this commit.
 
@@ -11,7 +11,7 @@
 - YOLO11n object recognition and person following with target tracking, stop-on-loss and manual override.
 - Controller safety: 300 ms deadman, server velocity limits, browser/key-release stop and restricted action whitelist.
 - Unit tests are present under `go2_control/controller/tests/`; their latest execution result is **not recorded here**.
-- Existing `Go2/VERSION` on this branch: `0.26.0-dev`. No new SemVer release or tag is declared by this documentation update.
+- Release version: `0.26.0`. Source release record: `docs/releases/v0.26.0.md`. Annotated Git tag pending.
 - Deployment instructions in the integrated controller README describe macOS; Linux/WSL instructions for DDStation should be validated before publication.
 
 ### Other unreleased experiments
