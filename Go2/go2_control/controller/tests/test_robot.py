@@ -20,7 +20,8 @@ class FakeRobot(R.BaseRobot):
         self.posture_state = posture  # as if telemetry had confirmed it
         self.sent = []
         self.silent = silent
-        self.codes = {}  # command name -> reply code (default 0)
+        self.codes = {}   # command name -> reply code (default 0)
+        self.delays = {}  # command name -> seconds until the reply
         self._sent_lock = threading.Lock()
 
     async def _open_transport(self):
@@ -37,7 +38,12 @@ class FakeRobot(R.BaseRobot):
         fut = self._loop.create_future()
         if not self.silent:
             code = self.codes.get(name, 0)
-            self._loop.call_soon(fut.set_result, {"data": {"header": {"status": {"code": code}}}})
+            reply = {"data": {"header": {"status": {"code": code}}}}
+            delay = self.delays.get(name, 0)  # e.g. a trick that answers only when it finishes
+            if delay:
+                self._loop.call_later(delay, lambda: fut.done() or fut.set_result(reply))
+            else:
+                self._loop.call_soon(fut.set_result, reply)
         return fut
 
     def names(self):

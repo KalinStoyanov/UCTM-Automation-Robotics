@@ -58,7 +58,10 @@ def setup_logging() -> None:
     LOG_DIR.mkdir(exist_ok=True)
     fmt = logging.Formatter("%(asctime)s.%(msecs)03d %(levelname)-7s %(name)-14s %(message)s", "%H:%M:%S")
     root = logging.getLogger()
-    root.setLevel(logging.INFO)
+    # WARNING on the root logger: unitree_webrtc_connect calls logging.info() on the root logger for
+    # every datachannel message (~20/s of JSON), which made a 47 MB log in one robot session.
+    root.setLevel(logging.WARNING)
+    logging.getLogger("go2").setLevel(logging.INFO)  # our loggers: go2, go2.app, go2.ui, go2.follow, ...
     for h in (logging.StreamHandler(sys.stdout),
               logging.FileHandler(LOG_DIR / f"controller-{time.strftime('%Y%m%d')}.log", encoding="utf-8")):
         h.setFormatter(fmt)
@@ -85,9 +88,10 @@ def create_app(robot: BaseRobot, detector=None, push_telemetry_task: bool = True
     actions = available_actions()
     ai_modes = {"gestures": gestures, "objects": objects, "follow": follow}
 
-    # Open_Palm while following = stop following (instead of its mapped action).
-    gestures.override = lambda g: ("FollowStop", lambda: follow.disable("gesture")) \
-        if g == "Open_Palm" and follow.enabled else None
+    # Open_Palm while following = stop following ("Спрях", the mode stays armed) instead of
+    # its mapped action. While only armed, the palm keeps its normal meaning.
+    gestures.override = lambda g: ("FollowStop", lambda: follow.stop_following("palm")) \
+        if g == "Open_Palm" and follow.following else None
 
     # A gesture that sits / lays the robot down also ends following: otherwise follow's next
     # Move would stand it up again through the posture logic and walk off.
@@ -163,6 +167,7 @@ def create_app(robot: BaseRobot, detector=None, push_telemetry_task: bool = True
             socketio.emit("notice", {"text": text, "kind": "follow_off", "reason": reason})
 
     follow.on_disabled = on_follow_disabled
+    follow.on_change = lambda: socketio.emit("telemetry", _telemetry())  # banner without the 0.5 s lag
     robot.events.subscribe(lambda e: socketio.emit("log", e))
 
     driver = {"sid": None}  # the client currently commanding motion
@@ -218,6 +223,28 @@ def create_app(robot: BaseRobot, detector=None, push_telemetry_task: bool = True
         socketio.emit("telemetry", _telemetry())  # chain / velocity state right away
         return {"ok": True, "code": code}
 
+    EMERGENCY_MIN_HOLD_MS = 1400  # the button needs a 1.5 s hold; refuse anything shorter
+
+    @socketio.on("emergency")
+    def on_emergency(data):
+        """АВАРИЙНО (press-and-hold 1.5 s): Damp. Cancels demo / follow / chains first."""
+        held = (data or {}).get("held_ms", 0)
+        try:
+            held = float(held)
+        except (TypeError, ValueError):
+            held = 0
+        if held < EMERGENCY_MIN_HOLD_MS:
+            log.warning("emergency refused: held only %s ms", held)
+            return {"ok": False, "error": "hold"}
+        manual_override()
+        fut = robot.emergency_damp()
+        try:
+            code = fut.result(timeout=1.5)
+        except Exception:  # noqa: BLE001
+            code = None
+        socketio.emit("telemetry", _telemetry())
+        return {"ok": True, "code": code}
+
     @socketio.on("ai")
     def on_ai(data):
         data = data or {}
@@ -251,8 +278,11 @@ def create_app(robot: BaseRobot, detector=None, push_telemetry_task: bool = True
         if not names or any(n not in robot.posture_allowed for n in names):
             return {"ok": False, "error": "posture not allowed"}
         manual_override()
+        if data.get("reset"):
+            robot.posture_reset()  # neutral attitude, then leave pose mode
+            return {"ok": True}
         for n in names:
-            robot.posture(n, POSTURE_NEUTRAL[n] if data.get("reset") else data.get("param"))
+            robot.posture(n, data.get("param"))
         return {"ok": True}
 
     @socketio.on("ai_all_off")

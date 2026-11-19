@@ -4,6 +4,9 @@ Run: .venv/bin/python -m unittest discover -s controller/tests -t . -v
 """
 import time
 import unittest
+from unittest import mock
+
+from controller import robot as R
 
 from controller.tests.test_follow import FakeDetector, person
 from controller.tests.test_robot import FakeRobot
@@ -27,20 +30,65 @@ class RobotStopTest(unittest.TestCase):
         self.assertIn("СТОП", texts)
         self.assertTrue(any(t.startswith("StopMove: OK") for t in texts), texts)
 
-    def test_stop_while_trick_running_notes_it(self):
+    def test_stop_during_trick_sends_stopmove_then_balance(self):
         self.r.waits["Hello"] = 5.0
         self.r.action("Hello").result(timeout=2)
+        self.r.clear()
         self.r.stop().result(timeout=2)
-        notes = [t for t in self.r.events.texts() if "не може да прекъсне" in t]
-        self.assertEqual(len(notes), 1, self.r.events.texts())
+        self.assertEqual(self.r.names(), ["StopMove", "BalanceStand"])
+        texts = self.r.events.texts()
+        notes = [t for t in texts if "още върви" in t]
+        self.assertEqual(len(notes), 1, texts)
         self.assertIn("Здрасти", notes[0])
+        self.assertTrue(any(t.startswith("StopMove: OK") for t in texts), texts)
+        self.assertTrue(any(t.startswith("Баланс: OK") for t in texts), texts)
 
-    def test_no_trick_note_when_trick_finished(self):
+    def test_robot_fsm_1006_means_trick_running(self):
+        self.r.action("Hello").result(timeout=2)   # waits are 0: the estimate says "over"
+        self.r._telemetry["fsm"] = 1006            # ... but the robot says a trick runs
+        self.r.clear()
+        self.r.stop().result(timeout=2)
+        self.assertEqual(self.r.names(), ["StopMove", "BalanceStand"])
+
+    def test_after_stop_fsm_is_reported(self):
+        self.r.waits["Hello"] = 5.0
+        self.r.action("Hello").result(timeout=2)
+        self.r._telemetry["fsm"] = 1006
+        with mock.patch.object(R, "STOP_CHECK_AFTER", 0.2):
+            self.r.stop().result(timeout=2)
+            time.sleep(0.4)
+        self.assertTrue(any(t.startswith("0 s след СТОП: робот FSM 1006") or "FSM 1006" in t
+                            for t in self.r.events.texts()), self.r.events.texts())
+
+    def test_no_balance_when_no_trick(self):
         self.r.waits["Hello"] = 0.1
         self.r.action("Hello").result(timeout=2)
         time.sleep(0.2)
+        self.r.clear()
         self.r.stop().result(timeout=2)
-        self.assertFalse(any("не може да прекъсне" in t for t in self.r.events.texts()))
+        self.assertEqual(self.r.names(), ["StopMove"])
+        self.assertFalse(any("още върви" in t for t in self.r.events.texts()))
+
+    def test_late_reply_is_logged_and_ends_the_trick(self):
+        self.r.waits["Dance1"] = 30.0
+        self.r.delays["Dance1"] = 1.3   # robot answers when the dance is over
+        self.assertEqual(self.r.action("Dance1").result(timeout=3), "timeout")
+        self.assertEqual(self.r._trick_running(), "Dance1")
+        time.sleep(0.6)
+        self.assertTrue(any(t.startswith("Танц 1: завърши, OK") for t in self.r.events.texts()), self.r.events.texts())
+        self.assertIsNone(self.r._trick_running())
+
+    def test_emergency_damp(self):
+        self.r.set_velocity(0.3, 0, 0)
+        self.assertEqual(self.r.emergency_damp().result(timeout=2), 0)
+        self.assertEqual(self.r.names()[-1], "Damp")
+        self.assertEqual(self.r.posture_state, R.LYING)
+        self.assertIn("АВАРИЙНО: Damp", self.r.events.texts())
+        with self.assertRaises(ValueError):
+            self.r.action("Damp")  # still not an ordinary action
+        self.r.clear()
+        self.r.action("Hello").result(timeout=3)  # posture logic stands it up again
+        self.assertEqual(self.r.names(), ["StandUp", "BalanceStand", "Hello"])
 
     def test_upper_layer_stop_is_not_logged_as_stop_button(self):
         self.r.stop(note="Следване: няма човек → стоп").result(timeout=2)
@@ -95,6 +143,20 @@ class StopButtonEndToEndTest(unittest.TestCase):
         logs = [e["args"][0]["text"] for e in self.c.get_received() if e["name"] == "log"]
         self.assertIn("СТОП", logs)
         self.assertTrue(any(t.startswith("StopMove: OK") for t in logs), logs)
+
+    def test_emergency_needs_the_hold(self):
+        self.assertEqual(self.c.emit("emergency", {"held_ms": 300}, callback=True), {"ok": False, "error": "hold"})
+        self.assertEqual(self.c.emit("emergency", {}, callback=True)["ok"], False)
+        self.assertNotIn("Damp", self.r.names())
+
+    def test_emergency_cancels_demo_and_follow_and_damps(self):
+        self.assertTrue(self.c.emit("demo", {"start": True}, callback=True)["ok"])
+        self.c.emit("ai", {"mode": "follow", "on": True}, callback=True)
+        res = self.c.emit("emergency", {"held_ms": 1520}, callback=True)
+        self.assertEqual(res, {"ok": True, "code": 0})
+        self.assertFalse(self.demo.running)
+        self.assertFalse(self.follow.enabled)
+        self.assertEqual(self.r.names()[-1], "Damp")
 
     def test_log_history_sent_on_connect(self):
         self.r.events.add("тест")

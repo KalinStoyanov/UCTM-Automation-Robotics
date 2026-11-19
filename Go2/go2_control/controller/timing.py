@@ -14,6 +14,7 @@ ACTION_WAIT = {
     "BalanceStand": 1.0,
     "RecoveryStand": 3.0,
     "Euler": 0.5,
+    "Pose": 0.5,
     "BodyHeight": 0.5,
     # tricks (StopMove cannot interrupt these once started)
     "Hello": 4.0,

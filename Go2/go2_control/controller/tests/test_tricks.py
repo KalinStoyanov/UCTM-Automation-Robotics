@@ -13,7 +13,7 @@ from controller import timing as T
 from controller.tests.test_robot import FakeRobot
 
 ROOT = Path(__file__).resolve().parents[2]
-TRICKS = ["Hello", "Stretch", "Dance1", "Dance2", "Content", "Scrape", "WiggleHips", "FingerHeart"]
+TRICKS = ["Hello", "Stretch", "Dance1", "Dance2", "Content", "Scrape", "FingerHeart"]
 NEVER = ["Damp", "FrontFlip", "BackFlip", "LeftFlip", "RightFlip", "FrontJump", "FrontPounce",
          "Handstand", "Bound", "MoonWalk", "StandOut", "Wallow"]
 
@@ -65,10 +65,29 @@ class TrickCatalogTest(unittest.TestCase):
         r = FakeRobot(posture=R.SITTING).start()
         r.connect().result(timeout=2)
         try:
-            self.assertEqual(r.action("WiggleHips").result(timeout=3), 0)
-            self.assertEqual(r.names(), ["RiseSit", "BalanceStand", "WiggleHips"])
+            self.assertEqual(r.action("FingerHeart").result(timeout=3), 0)
+            self.assertEqual(r.names(), ["RiseSit", "BalanceStand", "FingerHeart"])
         finally:
             r.close()
+
+    def test_wigglehips_removed_rejected_by_firmware(self):
+        # robot log 2026-11-19: WiggleHips -> code 3203 x6, never moved; not in SPORT_CMD_MCF
+        self.assertFalse(R.fw_supported("WiggleHips"))
+        self.assertNotIn("WiggleHips", [a["name"] for a in R.available_actions()])
+        r = FakeRobot().start()
+        try:
+            with self.assertRaises(ValueError):
+                r.action("WiggleHips")
+        finally:
+            r.close()
+
+    def test_everything_that_worked_on_the_robot_is_still_offered(self):
+        worked = ["StandUp", "StandDown", "BalanceStand", "RecoveryStand", "Sit", "RiseSit",
+                  "Hello", "Stretch", "Content", "Scrape", "FingerHeart", "Dance1", "Dance2"]
+        offered = [a["name"] for a in R.available_actions()]
+        for n in worked:
+            self.assertIn(n, offered)
+            self.assertTrue(R.fw_supported(n), n)
 
 
 if __name__ == "__main__":

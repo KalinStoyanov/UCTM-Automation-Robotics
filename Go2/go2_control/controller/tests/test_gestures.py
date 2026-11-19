@@ -28,7 +28,9 @@ class MappingTableTest(unittest.TestCase):
     def test_table(self):
         self.assertEqual(G.MAPPING["Pointing_Up"], "StandUp")
         self.assertEqual(G.MAPPING["Thumb_Down"], "StandDown")
-        self.assertEqual(G.MAPPING["ILoveYou"], "FingerHeart")
+        self.assertEqual(G.MAPPING["Victory"], "FingerHeart")
+        self.assertNotIn("ILoveYou", G.MAPPING)              # unreliable on the robot
+        self.assertNotIn("Stretch", G.MAPPING.values())      # Протягане is a button only
         # unchanged entries
         self.assertEqual(G.MAPPING["Thumb_Up"], "Hello")
         self.assertEqual(G.MAPPING["Open_Palm"], "RiseSit")
@@ -38,7 +40,7 @@ class MappingTableTest(unittest.TestCase):
         try:
             r.allowed = r.allowed - {"FingerHeart"}  # as if the library lacked it
             gm = G.GestureMode(r)
-            self.assertNotIn("ILoveYou", gm.mapping)
+            self.assertNotIn("Victory", gm.mapping)
             self.assertIn("Pointing_Up", gm.mapping)
         finally:
             r.close()
@@ -70,12 +72,16 @@ class GestureThroughPostureTest(unittest.TestCase):
         self.assertEqual(names, ["RiseSit", "StandDown"])
         self.assertEqual(posture, R.LYING)
 
-    def test_iloveyou_from_lying_stands_up_first(self):
-        names, _ = self.run_gesture(R.LYING, "ILoveYou")
+    def test_victory_from_lying_stands_up_first_and_makes_a_heart(self):
+        names, _ = self.run_gesture(R.LYING, "Victory")
         self.assertEqual(names, ["StandUp", "BalanceStand", "FingerHeart"])
 
-    def test_fires_once_per_hold(self):
+    def test_iloveyou_does_nothing(self):
         names, _ = self.run_gesture(R.STANDING, "ILoveYou")
+        self.assertEqual(names, [])
+
+    def test_fires_once_per_hold(self):
+        names, _ = self.run_gesture(R.STANDING, "Victory")
         self.assertEqual(names.count("FingerHeart"), 1)
 
 
@@ -113,7 +119,7 @@ class GestureEndsFollowTest(unittest.TestCase):
         self.assertFalse(self.follow.enabled)
 
     def test_other_gestures_keep_following(self):
-        feed(self.gestures, "ILoveYou")
+        feed(self.gestures, "Victory")
         self.assertTrue(self.follow.enabled)
 
 

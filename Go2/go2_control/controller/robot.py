@@ -18,7 +18,7 @@ from typing import Any
 
 import numpy as np
 
-from unitree_webrtc_connect.constants import DATA_CHANNEL_TYPE, RTC_TOPIC, SPORT_CMD
+from unitree_webrtc_connect.constants import DATA_CHANNEL_TYPE, RTC_TOPIC, SPORT_CMD, SPORT_CMD_MCF
 
 from .events import EventLog
 from .timing import ACTION_WAIT, TRICKS
@@ -48,7 +48,8 @@ DEADMAN = 0.3      # no set_velocity for this long -> StopMove once
 REPLY_TIMEOUT = 1.0   # awaited commands (StandUp, Sit, Hello, BalanceStand, StopMove, ...)
 
 # Actions shown in the UI, in display order: (SPORT_CMD name, Bulgarian label, icon id, group).
-# "Трикове" = every in-place trick in the installed SPORT_CMD. Left out on purpose:
+# "Трикове" = every in-place trick in the installed SPORT_CMD that the firmware accepts
+# (WiggleHips is listed but filtered out by fw_supported: code 3203 on 1.1.12). Left out on purpose:
 # Wallow (rolls onto its back, posture afterwards unknown), Trigger (reserved id, unclear),
 # Dance3/Dance4 (not in this library's SPORT_CMD), and everything in FORBIDDEN.
 ACTION_CATALOG = [
@@ -71,7 +72,8 @@ ACTION_GROUPS = {"posture": "Поза", "tricks": "Трикове"}
 
 # Bulgarian names for the operator log.
 LABELS = {n: lbl for n, lbl, _, _ in ACTION_CATALOG}
-LABELS.update({"StopMove": "StopMove", "Move": "Движение", "Euler": "Наклон", "BodyHeight": "Височина"})
+LABELS.update({"StopMove": "StopMove", "Move": "Движение", "Euler": "Наклон", "BodyHeight": "Височина",
+               "Damp": "Damp", "Pose": "Режим поза"})
 
 
 def label(name: str) -> str:
@@ -97,6 +99,12 @@ FORBIDDEN = {
 
 # After these, the robot must be put in BalanceStand before it accepts Move.
 NEEDS_BALANCE_AFTER = {"StandUp", "RiseSit", "RecoveryStand"}
+
+FSM_TRICK = 1006        # sportmodestate error_code while a trick runs (robot log, fw 1.1.12)
+STOP_CHECK_AFTER = 2.0  # s after СТОП/АВАРИЙНО: log the robot's FSM state (did it stop?)
+
+# Replies to RTC_TOPIC["SPORT_MOD"] requests come back on this topic (robot logs, fw 1.1.12).
+SPORT_RESPONSE_TOPIC = "rt/api/sport/response"
 
 # ---------------- posture logic ----------------
 STANDING, SITTING, LYING, UNKNOWN = "STANDING", "SITTING", "LYING", "UNKNOWN"
@@ -155,20 +163,33 @@ MODE_NAMES = {
 }
 
 
+# Firmware 1.1.12 (>= 1.1.7) runs the MCF sport API (library table SPORT_CMD_MCF). Robot test
+# 2026-11-19: WiggleHips (1033) and BodyHeight (1013) answered code 3203 every time and never
+# moved; both are missing from SPORT_CMD_MCF, while every command that worked is in it.
+# So only commands whose api_id is in that table are offered.
+MCF_IDS = frozenset(SPORT_CMD_MCF.values())
+
+
+def fw_supported(name: str) -> bool:
+    return SPORT_CMD.get(name) in MCF_IDS
+
+
 def available_actions(cmds: dict | None = None) -> list[dict]:
-    """Catalog entries whose SPORT_CMD name exists in the installed library."""
+    """Catalog entries whose SPORT_CMD name exists in the installed library and whose api_id
+    the robot firmware accepts (SPORT_CMD_MCF)."""
     cmds = SPORT_CMD if cmds is None else cmds
     return [
         {"name": n, "label": lbl, "icon": icon, "group": group}
         for n, lbl, icon, group in ACTION_CATALOG
-        if n in cmds and n not in FORBIDDEN
+        if n in cmds and n not in FORBIDDEN and fw_supported(n)
     ]
 
 
 def available_posture(cmds: dict | None = None) -> dict:
-    """Posture commands whose SPORT_CMD name exists, with their parameter ranges."""
+    """Posture commands whose SPORT_CMD name exists and that the firmware accepts, with their
+    parameter ranges. BodyHeight: code 3203 on fw 1.1.12 (robot log 2026-11-19) -> hidden."""
     cmds = SPORT_CMD if cmds is None else cmds
-    return {n: lim for n, lim in POSTURE_LIMITS.items() if n in cmds}
+    return {n: lim for n, lim in POSTURE_LIMITS.items() if n in cmds and fw_supported(n)}
 
 
 def clamp_posture(name: str, param: dict | None) -> dict[str, float]:
@@ -211,6 +232,8 @@ class BaseRobot:
         self._settle_until = 0.0              # posture motion still running until then
         self._plan_task: asyncio.Task | None = None
         self._plan_busy = False               # a chain is still sending its auto-inserted steps
+        self._pose_mode = False               # Pose (1028) on: body attitude control (Euler)
+        self._plan_name: str | None = None
         self._busy_name: str | None = None   # trick the robot is (probably) still performing
         self._busy_until = 0.0
         self.allowed = {a["name"] for a in available_actions()}
@@ -231,7 +254,7 @@ class BaseRobot:
         self._error = ""
         self._want_connected = False
         self._telemetry: dict[str, Any] = {
-            "battery": None, "voltage": None, "mode": None, "mode_id": None,
+            "battery": None, "voltage": None, "mode": None, "mode_id": None, "fsm": None,
             "last_command": None, "last_code": None, "last_command_at": None,
         }
         self._started = False
@@ -304,10 +327,33 @@ class BaseRobot:
         return self._submit(self._do_action(name))
 
     def posture(self, name: str, param: dict | None = None):
-        """Euler / BodyHeight with clamped parameters, sent as an awaited action."""
+        """Euler / BodyHeight with clamped parameters, sent as an awaited action.
+        Euler switches the robot into pose mode first (see _run_plan)."""
         if name not in self.posture_allowed:
             raise ValueError(f"posture not allowed: {name}")
         return self._submit(self._do_action(name, clamp_posture(name, param)))
+
+    def posture_reset(self):
+        """Neutral attitude, then leave pose mode."""
+        return self._submit(self._do_posture_reset())
+
+    async def _do_posture_reset(self) -> Any:
+        if not self._pose_mode:  # a tilt only exists in pose mode; never stand the robot up for this
+            self.events.add("Позата вече е неутрална")
+            return 0
+        code = await self._send("Euler", dict(POSTURE_NEUTRAL["Euler"]))
+        await self._set_pose_mode(False)
+        return code
+
+    async def _set_pose_mode(self, on: bool) -> Any:
+        """Pose (1028): on fw 1.1.12 Euler answered code 0 but did not move the body in the
+        normal balance stand (FSM 100); attitude control needs pose mode."""
+        code = await self._send("Pose", {"data": on})
+        if code in (0, "timeout"):
+            self._pose_mode = on
+        if on:
+            self._settle_until = max(self._settle_until, time.monotonic() + self.waits.get("Pose", 0.0))
+        return code
 
     def set_velocity(self, vx: Any, vy: Any, vyaw: Any) -> tuple[float, float, float]:
         vel = clamp_velocity(vx, vy, vyaw)
@@ -387,6 +433,9 @@ class BaseRobot:
             done, _ = await asyncio.wait({fut}, timeout=REPLY_TIMEOUT)
             if not done:
                 code = "timeout"  # not cancelled on purpose: a late reply must not hit a cancelled future
+                # The robot answers long actions only when they finish (Dance1: after 16 s on the
+                # robot); log that late reply so the operator sees when a trick is really over.
+                fut.add_done_callback(lambda f, n=name, t=t0: self._late_reply(n, t, f))
             else:
                 try:
                     code = self._reply_code(fut.result())
@@ -399,6 +448,27 @@ class BaseRobot:
         if ui:
             self.events.add(f"{label(name)}: {code_text(code)} ({ms:.0f} ms)", "ok" if code == 0 else "warn")
         return code
+
+    def _late_reply(self, name: str, t0: float, fut) -> None:
+        if fut.cancelled():
+            return
+        try:
+            code = self._reply_code(fut.result())
+        except Exception as e:  # noqa: BLE001
+            code = f"error: {e}"
+        secs = time.monotonic() - t0
+        log.info("CMD %-12s late reply -> code=%s (%.1f s)", name, code, secs)
+        self.events.add(f"{label(name)}: завърши, {code_text(code)} (след {secs:.1f} s)", "ok" if code == 0 else "warn")
+        if name == self._busy_name:
+            self._busy_until = 0.0  # the trick is over
+
+    def _trick_running(self) -> str | None:
+        """Name of the trick that is (probably) still running. Real robot: sportmodestate
+        error_code 1006 while a trick runs (robot log 2026-11-19); sim: our time estimate."""
+        if self._busy_name and (self._telemetry.get("fsm") == FSM_TRICK
+                                or time.monotonic() < self._busy_until):
+            return self._busy_name
+        return None
 
     async def _send(self, name: str, param: dict | None = None, ui: bool = True) -> Any:
         """Send now and await the reply (max REPLY_TIMEOUT). Never used for Move."""
@@ -454,7 +524,8 @@ class BaseRobot:
             self._send_bg("StopMove")  # on the wire now; reply logged in the background
         if self._plan_busy and self._plan_task is not None:
             self._plan_task.cancel()  # a newer request replaces a chain that is still preparing
-            self.events.add("Авто-веригата е заменена от нова команда", "warn")
+            if self._plan_name != name:  # e.g. slider steps replacing each other are not news
+                self.events.add("Авто-веригата е заменена от нова команда", "warn")
         task = self._start_plan(name, param)
         try:
             return await task
@@ -464,12 +535,17 @@ class BaseRobot:
     # ---------- posture chains ----------
     def _start_plan(self, name: str, param: dict | None = None) -> asyncio.Task:
         self._plan_busy = True  # set synchronously: the control loop must not start a second chain
+        self._plan_name = name
         self._plan_task = self._loop.create_task(self._run_plan(name, param))
         return self._plan_task
 
     async def _run_plan(self, name: str, param: dict | None) -> Any:
         me = asyncio.current_task()
         try:
+            if self._pose_mode and name != "Euler":
+                # anything else (actions, movement) leaves pose mode first
+                self.events.add("Авто: изключвам режим поза")
+                await self._set_pose_mode(False)
             steps = plan_steps(name, self.posture_state, not self._needs_balance)
             what = "движение" if name == "Move" else label(name)
             if not steps:
@@ -488,6 +564,10 @@ class BaseRobot:
                 await self._wait_settled()
                 if i == len(steps) - 1 and name != "Move":
                     # the requested command itself: await its reply, like any action
+                    if cmd == "Euler" and not self._pose_mode:
+                        self.events.add("Авто: режим поза за наклона")
+                        await self._set_pose_mode(True)
+                        await self._wait_settled()
                     self._plan_busy = False
                     return await self._send_tracked(cmd, param if cmd == name else None)
                 reply = self._send_tracked_bg(cmd)  # auto step: never block on its reply
@@ -553,11 +633,49 @@ class BaseRobot:
             self._plan_task.cancel()
             self._plan_busy = False
             self.events.add("Авто-веригата е отменена", "warn")
-        remaining = self._busy_until - time.monotonic()
-        if self._busy_name and remaining > 0:
-            self.events.add(f"„{label(self._busy_name)}“ още върви: StopMove не може да прекъсне "
-                            f"започнат трик (~{remaining:.0f} s)", "warn")
-        return await self._send("StopMove")
+        trick = self._trick_running()
+        if not trick:
+            return await self._send("StopMove")
+        # During a trick the robot did not answer StopMove at all (Dance2, robot log 2026-11-19).
+        # Try StopMove and right after it BalanceStand, and log what each one returns.
+        self.events.add(f"„{label(trick)}“ още върви: StopMove + Баланс, за да опитам да го прекъсна", "warn")
+        self._issue_and_log("StopMove")
+        self._needs_balance = False
+        code = await self._send_tracked("BalanceStand")
+        self._loop.call_later(STOP_CHECK_AFTER, self._report_after_stop, trick)
+        return code
+
+    def _issue_and_log(self, name: str) -> None:
+        """Send now; await + log its reply in the background (keeps the wire order)."""
+        self._loop.create_task(self._await_reply(name, None, *self._issue(name, None), ui=True))
+
+    def _report_after_stop(self, trick: str) -> None:
+        fsm = self._telemetry.get("fsm")
+        if fsm is None:
+            return  # sim: no robot state to report
+        still = fsm == FSM_TRICK
+        self.events.add(f"{STOP_CHECK_AFTER:.0f} s след СТОП: робот FSM {fsm}"
+                        + (f" (трикът „{label(trick)}“ още върви)" if still else ""), "warn" if still else "info")
+
+    def emergency_damp(self):
+        """АВАРИЙНО: Damp (motors go limp, the robot lowers itself to the ground). Deliberately
+        outside the action whitelist, where Damp stays forbidden."""
+        with self._lock:
+            self._vel = (0.0, 0.0, 0.0)
+            self._pending_stop = False
+        return self._submit(self._do_damp())
+
+    async def _do_damp(self) -> Any:
+        self._moving = False
+        self.events.add("АВАРИЙНО: Damp", "danger")
+        if self._plan_busy and self._plan_task is not None:
+            self._plan_task.cancel()
+            self._plan_busy = False
+        code = await self._send("Damp")
+        if code in (0, "timeout"):
+            self.posture_state, self._needs_balance = LYING, True
+        self._loop.call_later(STOP_CHECK_AFTER, self._report_after_stop, self._busy_name or "Damp")
+        return code
 
     async def _control_loop(self) -> None:
         """10 Hz movement loop. Nothing in here awaits the robot."""
@@ -585,7 +703,7 @@ class BaseRobot:
                     continue
                 if self._plan_busy:
                     continue  # a posture chain is running: hold Moves until it is done
-                if self.posture_state != STANDING or self._needs_balance:
+                if self.posture_state != STANDING or self._needs_balance or self._pose_mode:
                     self._start_plan("Move")  # stand up / balance first (BalanceStand rule included)
                     continue
                 if now < self._settle_until or now < next_move:
@@ -669,8 +787,9 @@ class RobotSession(BaseRobot):
             await res
         ps = conn.datachannel.pub_sub
         # Local hook only (no subscribe message to the robot): pub_sub.run_resolve calls
-        # subscriptions[topic] for every incoming message on that topic, replies included.
-        ps.subscriptions[RTC_TOPIC["SPORT_MOD"]] = self._on_sport_reply
+        # subscriptions[topic] for every incoming message on that topic. Replies to
+        # rt/api/sport/request arrive on rt/api/sport/response (seen in the robot logs).
+        ps.subscriptions[SPORT_RESPONSE_TOPIC] = self._on_sport_reply
         ps.subscribe(RTC_TOPIC["LOW_STATE"], self._on_low_state)
         ps.subscribe(RTC_TOPIC["LF_SPORT_MOD_STATE"], self._on_sport_state)
 
@@ -742,6 +861,8 @@ class RobotSession(BaseRobot):
 
     def _on_sport_state(self, msg: dict) -> None:
         d = msg.get("data") or {}
+        if "error_code" in d:  # fw 1.1.12: the FSM state (1006 = trick running), "mode" stays 0
+            self._telemetry["fsm"] = d["error_code"]
         if "mode" in d:
             m = d["mode"]
             self._telemetry["mode_id"] = m

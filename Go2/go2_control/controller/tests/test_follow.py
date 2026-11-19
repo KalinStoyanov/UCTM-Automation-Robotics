@@ -5,6 +5,7 @@ Run: .venv/bin/python -m unittest discover -s controller/tests -t . -v
 import threading
 import time
 import unittest
+from unittest import mock
 
 from controller.ai import follow as F
 from controller.ai.detector import Box, Detections
@@ -13,9 +14,10 @@ from controller.tests.test_robot import FakeRobot
 CFG = F.clamp_config({})
 
 
-def person(cx, h, w=None, cy=0.5, conf=0.9):
+def person(cx, h, w=None, cy=0.5, conf=0.9, arms=0):
+    """Person box; arms = arms above the head (0/1/2) or None (pose unknown)."""
     w = w if w is not None else h * 0.4
-    return Box(cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2, "person", conf)
+    return Box(cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2, "person", conf, arms)
 
 
 class ControlMathTest(unittest.TestCase):
@@ -78,69 +80,126 @@ class ControlMathTest(unittest.TestCase):
         self.assertEqual(F.clamp_config({"max_vx": 0.1})["max_vx"], F.MIN_VX)  # slider floor
 
 
-class TrackerTest(unittest.TestCase):
-    def test_largest_person_becomes_target(self):
-        c = F.FollowController()
-        c.on_detections([person(0.2, 0.2), person(0.7, 0.4)], 0.0)
-        self.assertAlmostEqual(c.target.cx, 0.7)
+def run(c, frames, t0=0.0, dt=0.1):
+    """frames: list of person lists (one per 0.1 s). Returns [(t, Command)]."""
+    out = []
+    for n, persons in enumerate(frames):
+        t = t0 + n * dt
+        if persons is not None:
+            c.on_detections(persons, t)
+        out.append((round(t, 2), c.tick(t)))
+    return out
 
-    def test_keeps_target_by_iou_even_if_other_grows(self):
-        c = F.FollowController()
-        c.on_detections([person(0.3, 0.3)], 0.0)
-        c.on_detections([person(0.31, 0.3), person(0.8, 0.6)], 0.1)
-        self.assertAlmostEqual(c.target.cx, 0.31)
 
-    def test_switches_only_after_lost_half_second(self):
+class ArmGestureTest(unittest.TestCase):
+    """Follow only starts after one arm is held above the head for RAISE_HOLD."""
+
+    def test_armed_never_moves_without_a_raised_arm(self):
         c = F.FollowController()
-        c.on_detections([person(0.3, 0.3)], 0.0)
-        c.on_detections([person(0.8, 0.3)], 0.3)   # original gone 0.3 s: keep it
+        out = run(c, [[person(0.3, 0.3, arms=0)]] * 50)
+        self.assertTrue(all(cmd.kind == "idle" and cmd.status == "armed" for _, cmd in out))
+        self.assertEqual(c.state, F.ARMED)
+
+    def test_one_arm_for_1s_locks(self):
+        c = F.FollowController()
+        out = run(c, [[person(0.3, 0.3, arms=1)]] * 12)
+        kinds = [(t, cmd.kind) for t, cmd in out]
+        first_move = min(t for t, k in kinds if k == "move")
+        self.assertAlmostEqual(first_move, F.RAISE_HOLD, delta=0.11)
+        self.assertEqual(c.state, F.FOLLOWING)
+        self.assertEqual(c.events, ["lock"])
+
+    def test_short_raise_does_not_lock(self):
+        c = F.FollowController()
+        frames = [[person(0.3, 0.3, arms=1)]] * 6 + [[person(0.3, 0.3, arms=0)]] * 3 + [[person(0.3, 0.3, arms=1)]] * 6
+        out = run(c, frames)
+        self.assertTrue(all(cmd.kind == "idle" for _, cmd in out))  # 0.6 s + 0.6 s, never 1 s in a row
+
+    def test_unknown_pose_frame_neither_starts_nor_resets(self):
+        c = F.FollowController()
+        frames = [[person(0.3, 0.3, arms=1)]] * 5 + [[person(0.3, 0.3, arms=None)]] * 2 + [[person(0.3, 0.3, arms=1)]] * 5
+        run(c, frames)
+        self.assertEqual(c.state, F.FOLLOWING)
+
+    def test_both_arms_is_not_a_start_signal(self):
+        c = F.FollowController()
+        run(c, [[person(0.3, 0.3, arms=2)]] * 20)
+        self.assertEqual(c.state, F.ARMED)
+
+    def test_locks_the_person_who_raised_the_arm(self):
+        c = F.FollowController()
+        other = person(0.8, 0.6, arms=0)  # larger, but not asking
+        run(c, [[person(0.3, 0.3, arms=1), other]] * 12)
         self.assertAlmostEqual(c.target.cx, 0.3)
-        c.on_detections([person(0.8, 0.3)], 0.6)   # gone 0.6 s: switch
-        self.assertAlmostEqual(c.target.cx, 0.8)
 
-
-class SwitchWithoutStopTest(unittest.TestCase):
-    def test_target_jumps_but_someone_is_visible_no_stop(self):
-        """Target disappears while another person stays visible: switch after 0.5 s, never stop."""
+    def test_other_person_raising_arm_while_following_is_ignored(self):
         c = F.FollowController()
-        c.reset(0.0)
-        kinds = []
-        for i in range(30):
-            t = i * 0.1
-            if i < 10:
-                c.on_detections([person(0.3, 0.3)], t)
-            elif i % 2 == 0:                       # detections slower than the 10 Hz tick
-                c.on_detections([person(0.8, 0.3)], t)
-            kinds.append(c.tick(t).kind)
-        self.assertNotIn("stop", kinds)
-        self.assertAlmostEqual(c.target.cx, 0.8)
+        run(c, [[person(0.3, 0.3, arms=1)]] * 12)
+        run(c, [[person(0.3, 0.3, arms=0), person(0.8, 0.5, arms=1)]] * 15, t0=1.2)
+        self.assertAlmostEqual(c.target.cx, 0.3)
 
-
-class LostPersonTest(unittest.TestCase):
-    def test_lost_person_gives_exactly_one_stop(self):
+    def test_both_arms_for_1s_stops_once_then_rearms(self):
         c = F.FollowController()
-        c.reset(0.0)
-        out = []
-        for i in range(40):                       # 4 s at 10 Hz
-            t = i * 0.1
-            if t < 1.0:
-                c.on_detections([person(0.3, 0.3)], t)
-            elif i % 3 == 0:
-                c.on_detections([], t)            # detector keeps running, nobody there
-            out.append((round(t, 1), c.tick(t).kind))
-        stops = [t for t, k in out if k == "stop"]
-        self.assertEqual(len(stops), 1, out)
-        self.assertTrue(1.4 <= stops[0] <= 1.6, stops)  # last seen at 0.9 s + 0.5 s
-        moves = [t for t, k in out if k == "move"]
-        self.assertTrue(1.3 <= max(moves) <= 1.4, moves)  # coasts until the timeout, then stops
-        self.assertTrue(all(k != "move" for t, k in out if t > stops[0]))
+        run(c, [[person(0.3, 0.3, arms=1)]] * 12)
+        out = run(c, [[person(0.3, 0.3, arms=2)]] * 14, t0=1.2)
+        stops = [t for t, cmd in out if cmd.kind == "stop"]
+        self.assertEqual(len(stops), 1)
+        self.assertEqual(c.stop_reason, "both_arms")
+        self.assertEqual(c.state, F.STOPPED)
+        out = run(c, [[person(0.3, 0.3, arms=0)]] * 25, t0=2.6)
+        self.assertEqual(c.state, F.ARMED)  # after STOPPED_SHOW
+        self.assertTrue(all(cmd.kind != "move" for _, cmd in out))
 
-    def test_no_person_from_start_gives_one_stop(self):
+    def test_open_palm_stops(self):
         c = F.FollowController()
-        c.reset(10.0)
-        kinds = [c.tick(10.0 + i * 0.1).kind for i in range(30)]
-        self.assertEqual(kinds.count("stop"), 1)
-        self.assertNotIn("move", kinds)
+        run(c, [[person(0.3, 0.3, arms=1)]] * 12)
+        c.stop_following("palm")
+        self.assertEqual(c.tick(1.3).kind, "stop")
+        self.assertEqual(c.stop_reason, "palm")
+
+    def test_lost_for_2s_stops_once_and_stands_still_meanwhile(self):
+        c = F.FollowController()
+        run(c, [[person(0.3, 0.3, arms=1)]] * 12)  # locked at ~1.0, last seen 1.1
+        out = run(c, [[]] * 30, t0=1.2)            # nobody
+        stops = [t for t, cmd in out if cmd.kind == "stop"]
+        self.assertEqual(len(stops), 1)
+        self.assertAlmostEqual(stops[0], 1.1 + F.LOST_TIMEOUT, delta=0.11)
+        self.assertEqual(c.stop_reason, "lost")
+        # not seen -> commanded speed is zero (no blind driving) until the stop
+        moving = [cmd for t, cmd in out if cmd.kind == "move" and t > 1.1 + F.STALE + 0.05]
+        self.assertTrue(moving and all(cmd.vx == 0 and cmd.vyaw == 0 for cmd in moving))
+
+    def test_raise_progress(self):
+        c = F.FollowController()
+        run(c, [[person(0.3, 0.3, arms=1)]] * 6)
+        self.assertAlmostEqual(c.raise_progress(0.5), 0.5, delta=0.01)
+
+
+class ArmsRaisedTest(unittest.TestCase):
+    """Keypoint rule: wrist above the top of the head."""
+
+    @staticmethod
+    def kp(lw_y, rw_y, conf=0.9):
+        pts = [(0, 0, 0.0)] * 17
+        pts[0] = (50, 100, conf)            # nose
+        pts[1] = pts[2] = (50, 95, conf)    # eyes
+        pts[5] = (30, 150, conf)            # shoulders
+        pts[6] = (70, 150, conf)
+        pts[9] = (20, lw_y, conf)           # wrists
+        pts[10] = (80, rw_y, conf)
+        return pts
+
+    def test_counts(self):
+        from controller.ai.detector import arms_raised
+        # head top threshold = 95 - 0.3 * (150 - 95) = 78.5
+        self.assertEqual(arms_raised(self.kp(200, 200)), 0)
+        self.assertEqual(arms_raised(self.kp(60, 200)), 1)
+        self.assertEqual(arms_raised(self.kp(60, 50)), 2)
+        self.assertEqual(arms_raised(self.kp(85, 200)), 0)  # hand beside the head is not "above"
+
+    def test_unknown_when_head_or_shoulders_missing(self):
+        from controller.ai.detector import arms_raised
+        self.assertIsNone(arms_raised(self.kp(60, 200, conf=0.1)))
 
 
 class OpenPalmGestureTest(unittest.TestCase):
@@ -190,7 +249,7 @@ class FakeDetector:
             self._det = Detections(self._det.seq + 1, time.monotonic(), self._det.boxes)
         return self._det
 
-    def acquire(self, u):
+    def acquire(self, u, pose=False):
         self.users.add(u)
 
     def release(self, u):
@@ -203,6 +262,8 @@ class FollowIntegrationTest(unittest.TestCase):
     def setUp(self):
         from controller.app import create_app
 
+        self.patch = mock.patch.multiple(F, RAISE_HOLD=0.3, STOP_HOLD=0.3, LOST_TIMEOUT=0.8, STOPPED_SHOW=0.5)
+        self.patch.start()
         self.robot = FakeRobot().start()
         self.robot.connect().result(timeout=2)
         self.det = FakeDetector()
@@ -218,12 +279,18 @@ class FollowIntegrationTest(unittest.TestCase):
         if self.client.is_connected():
             self.client.disconnect()
         self.robot.close()
+        self.patch.stop()
 
     def start_following(self, p):
-        self.det.set_persons([p])
+        """Enable (armed), raise one arm for RAISE_HOLD, lower it: now following."""
+        up = Box(p.x1, p.y1, p.x2, p.y2, p.name, p.conf, 1)
+        self.det.set_persons([up])
         self.client.emit("ai", {"mode": "follow", "on": True}, callback=True)
         self.assertTrue(self.follow.enabled)
-        time.sleep(0.45)
+        time.sleep(F.RAISE_HOLD + 0.25)
+        self.assertTrue(self.follow.following, self.follow.state())
+        self.det.set_persons([p])
+        time.sleep(0.2)
 
     def moves(self):
         return [p for _, n, p in self.robot.sent if n == "Move"]
@@ -268,34 +335,57 @@ class FollowIntegrationTest(unittest.TestCase):
         self.client.emit("velocity", {"vx": 0, "vy": 0, "vyaw": 0})
         self.assertTrue(self.follow.enabled)
 
-    def test_open_palm_stops_following(self):
+    def test_armed_mode_does_not_move_or_stop(self):
+        self.det.set_persons([person(0.25, 0.25, arms=0)])
+        self.client.emit("ai", {"mode": "follow", "on": True}, callback=True)
+        time.sleep(1.0)
+        self.assertEqual(self.robot.names(), [])  # no Move, and no StopMove either
+        self.assertEqual(self.follow.state()["phase"], "armed")
+        self.assertEqual(self.follow.state()["status"], "armed")
+
+    def test_open_palm_stops_following_but_stays_armed(self):
+        self.assertIsNone(self.gestures.override("Open_Palm"))  # not following -> normal RiseSit
         self.start_following(person(0.25, 0.25))
         ov = self.gestures.override("Open_Palm")
         self.assertEqual(ov[0], "FollowStop")
         self.assertIsNone(self.gestures.override("Thumb_Up"))
         self.robot.clear()
         ov[1]()
-        self.assertFalse(self.follow.enabled)
-        self.assertEqual(self.follow.last_disable["reason"], "gesture")
         time.sleep(0.3)
+        self.assertTrue(self.follow.enabled)
+        self.assertEqual(self.follow.state()["phase"], "stopped")
+        self.assertEqual(self.follow.state()["stop_reason"], "длан")
         self.assertIn("StopMove", self.robot.names())
-        self.assertIsNone(self.gestures.override("Open_Palm"))  # not following -> normal RiseSit
+        self.assertNotIn("Move", self.robot.names()[self.robot.names().index("StopMove"):])
+        self.assertIn("Следване: спрях (длан)", self.robot.events.texts())
+
+    def test_both_arms_stop(self):
+        self.start_following(person(0.25, 0.25))
+        self.det.set_persons([person(0.25, 0.25, arms=2)])
+        time.sleep(F.STOP_HOLD + 0.3)
+        self.assertEqual(self.follow.state()["phase"], "stopped")
+        self.assertIn("Следване: спрях (двете ръце горе)", self.robot.events.texts())
 
     def test_person_lost_stops_once_and_stays_enabled(self):
         self.start_following(person(0.5, 0.3))
         self.det.set_persons([])
         self.det._det = Detections(self.det._det.seq + 1, time.monotonic(), ())
-        time.sleep(1.2)
+        time.sleep(F.LOST_TIMEOUT + 0.3)
         self.assertTrue(self.follow.enabled)
-        self.assertEqual(self.follow.state()["status"], "searching")
+        self.assertEqual(self.follow.state()["phase"], "stopped")
+        self.assertEqual(self.follow.state()["stop_reason"], "изгубих те")
         names = self.robot.names()
         last_move = max(i for i, n in enumerate(names) if n == "Move")
         self.assertEqual(names[last_move + 1:].count("StopMove"), 1, names[last_move:])
 
+    def test_lock_is_logged(self):
+        self.start_following(person(0.3, 0.3))
+        self.assertIn("Следване: вдигната ръка, следвам", self.robot.events.texts())
+
     def test_slow_detector_warns_and_caps_vx(self):
         self.det.fps = 3.0
-        self.start_following(person(0.5, 0.05))  # far away: would ask for 0.3 m/s
-        time.sleep(1.5)                          # warning only after 1.5 s of running
+        self.start_following(person(0.5, 0.05))  # far away: would ask for max speed
+        time.sleep(1.2)                          # warning only after 1.5 s of running
         st = self.follow.state()
         self.assertTrue(st["slow"])
         self.assertLessEqual(self.moves()[-1]["x"], F.SLOW_MAX_VX)

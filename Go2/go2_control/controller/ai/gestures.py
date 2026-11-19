@@ -25,11 +25,11 @@ MAPPING = {
     "Thumb_Up": "Hello",          # Палец нагоре -> Здрасти
     "Closed_Fist": "Sit",         # Юмрук -> Седни
     "Open_Palm": "RiseSit",       # Отворена длан -> Изправи от седнало (while following: stop following)
-    "Victory": "Stretch",         # Победа -> Протягане
+    "Victory": "FingerHeart",     # Победа -> Сърце (ILoveYou was not recognised reliably on the robot)
     "Pointing_Up": "StandUp",     # Сочи нагоре -> Стани
     "Thumb_Down": "StandDown",    # Палец надолу -> Легни
-    "ILoveYou": "FingerHeart",    # Обичам те -> Сърце
 }
+# Протягане (Stretch) is a button only.
 # ===========================================================================================
 LABELS = {
     "Thumb_Up": "Палец нагоре", "Closed_Fist": "Юмрук", "Open_Palm": "Отворена длан",

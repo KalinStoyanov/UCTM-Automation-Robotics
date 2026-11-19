@@ -117,6 +117,10 @@
           <dt><kbd>?</kbd></dt><dd>Тази легенда</dd>
         </dl>
       </div>
+      <div class="follow-banner" id="followBanner" data-phase="off" hidden aria-live="polite">
+        <span id="followBannerText"></span>
+        <i class="fb-bar" aria-hidden="true"><b id="followBannerBar"></b></i>
+      </div>
       <div class="vel" id="vel" aria-live="off">
         <span><i>vx</i><b class="num" id="vx">+0.00</b></span>
         <span><i>vy</i><b class="num" id="vy">+0.00</b></span>
@@ -140,6 +144,13 @@
       <span class="stop-label" id="stopLabel">СТОП</span>
       <kbd>Интервал · Esc</kbd>
     </button>
+    <div class="estop">
+      <button class="estop-btn" id="estopBtn" type="button" data-holding="false" aria-describedby="estopHint">
+        <span class="estop-fill" aria-hidden="true"></span>
+        <svg class="ic"><use href="#i-circle-alert"/></svg><span>Аварийно · Damp</span>
+      </button>
+      <p class="estop-hint" id="estopHint">Задръж 1,5 s. Моторите се отпускат и роботът се снижава до земята.</p>
+    </div>
     <ol class="feed" id="feed" aria-live="polite" aria-label="Дневник"></ol>
 
     <section class="panel" aria-labelledby="actionsTitle">
@@ -195,7 +206,7 @@
             <summary>Настройки</summary>
             <div class="sliders" id="fSliders"></div>
           </details>
-          <p class="follow-hint">Клавиш, джойстик, СТОП или длан спират следването.</p>
+          <p class="follow-hint">Вдигни една ръка над главата за ~1 s, за да започне. Двете ръце горе, длан (с Жестове), СТОП или ръчно управление спират.</p>
         </div>
       </div>
 
@@ -213,9 +224,21 @@
     <details class="panel more" id="morePanel" hidden>
       <summary><h2>Още</h2></summary>
       <div class="sliders" id="postureSliders"></div>
+      <p class="follow-hint">Наклонът включва режим поза (Pose); всяка друга команда или движение го изключва. Височината не се поддържа от фърмуера на робота.</p>
       <button class="btn-ghost more-reset" id="postureReset" type="button">Нулирай позата</button>
     </details>
   </aside>
+
+  <dialog class="confirm" id="danceConfirm" aria-labelledby="danceConfirmTitle">
+    <form method="dialog">
+      <h2 id="danceConfirmTitle">Нужни са 2 m свободно място наоколо</h2>
+      <p id="danceConfirmText">Танцът движи робота около мястото му. Провери, че никой не е по-близо от 2 m.</p>
+      <div class="confirm-actions">
+        <button value="cancel" class="btn-ghost" autofocus>Отказ</button>
+        <button value="ok" class="confirm-ok" id="danceConfirmOk">Танцувай</button>
+      </div>
+    </form>
+  </dialog>
 
   <div class="toasts" id="toasts" aria-live="polite"></div>
 </div>

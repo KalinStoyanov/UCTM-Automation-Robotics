@@ -108,6 +108,8 @@
 
   window.addEventListener("keydown", (e) => {
     if (e.metaKey || e.ctrlKey || e.altKey) return;
+    // a confirmation dialog is open: only СТОП keys work (Space / Esc), nothing drives behind it
+    if ($("danceConfirm").open && e.code !== "Space" && e.key !== "Escape") return;
     if (e.code === "Space" || e.key === "Escape") {
       e.preventDefault();
       if (e.key === "Escape") toggleLegend(false);
@@ -215,6 +217,38 @@
     btn._labelT = setTimeout(() => { $("stopLabel").textContent = "СТОП"; }, 900);
     if (!socketUp) addFeed({ t: Date.now() / 1000, text: "СТОП: няма връзка със сървъра!", level: "danger" });
   }
+
+  /* ---------------- АВАРИЙНО (press and hold 1.5 s -> Damp) ---------------- */
+  const ESTOP_HOLD_MS = 1500;
+  const estop = $("estopBtn");
+  let holdStart = 0, holdTimer = null;
+  function holdBegin() {
+    if (holdTimer) return;
+    holdStart = performance.now();
+    estop.dataset.holding = "true";
+    holdTimer = setTimeout(fireEmergency, ESTOP_HOLD_MS);
+  }
+  function holdEnd() {
+    clearTimeout(holdTimer);
+    holdTimer = null;
+    estop.dataset.holding = "false";
+  }
+  function fireEmergency() {
+    const held = performance.now() - holdStart;
+    holdTimer = null;
+    estop.dataset.holding = "false";
+    keys.clear(); moveStick.release(); turnStick.release(); streaming = false;
+    flash(estop);
+    socket.emit("emergency", { held_ms: Math.round(held) }, (res) => {
+      if (res && !res.ok) toast("Аварийното не е изпратено");
+    });
+  }
+  estop.addEventListener("pointerdown", (e) => { e.preventDefault(); estop.setPointerCapture(e.pointerId); holdBegin(); });
+  for (const t of ["pointerup", "pointercancel", "lostpointercapture"]) estop.addEventListener(t, holdEnd);
+  estop.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.repeat) { e.preventDefault(); holdBegin(); } });
+  estop.addEventListener("keyup", (e) => { if (e.key === "Enter") holdEnd(); });
+  estop.addEventListener("click", (e) => e.preventDefault());
+  estop.addEventListener("contextmenu", (e) => e.preventDefault());
 
   /* ---------------- operator log ("Дневник") ---------------- */
   const FEED_MAX = 6;
@@ -377,9 +411,21 @@
     document.querySelectorAll(".act").forEach((b) => { b.disabled = off; });
   }
 
-  function runAction(name) {
+  // Dances move around their spot: ask first (button and digit keys alike).
+  const DANCES = new Set(["Dance1", "Dance2"]);
+  function confirmDance(name) {
+    const dlg = $("danceConfirm");
+    releaseAll(); // keys held when the dialog opens must not keep driving behind it
+    $("danceConfirmOk").textContent = `Танцувай: ${actionLabels[name] || name}`;
+    dlg.returnValue = "";
+    dlg.onclose = () => { if (dlg.returnValue === "ok") runAction(name, true); };
+    dlg.showModal();
+  }
+
+  function runAction(name, confirmed = false) {
     const btn = document.querySelector(`.act[data-name="${name}"]`);
     if (linkState !== "connected") { toast("Роботът не е свързан"); return; }
+    if (DANCES.has(name) && !confirmed) { confirmDance(name); return; }
     keys.clear(); moveStick.release(); turnStick.release(); streaming = false;
     if (btn) flash(btn);
     socket.emit("action", { name }, (res) => {
@@ -435,15 +481,15 @@
     // while following, the open palm stops following instead of its mapped action
     const palm = $("gLegend").querySelector('li[data-g="Open_Palm"] span:last-child');
     if (palm) {
-      const following = !!(ai && ai.follow && ai.follow.enabled);
+      const following = !!(ai && ai.follow && ai.follow.phase === "following");
       palm.textContent = following ? actionLabels.FollowStop : (actionLabels[config.gesture_mapping.Open_Palm] || "");
     }
   }
 
   /* ---------------- follow ---------------- */
   const FOLLOW_STATUS = {
-    locked: "Целта е заключена", too_close: "Твърде близо", searching: "Търся човек…",
-    paused: "Пауза за действие", loading: "Зареждане на модела…", off: "Изключено",
+    armed: "Вдигни ръка, за да те следвам", following: "Следвам", too_close: "Следвам · твърде близо",
+    stopped: "Спрях", paused: "Пауза за действие", loading: "Зареждане на модела…", off: "Изключено",
   };
   const SLIDERS = [
     { key: "k_yaw", label: "Завиване K_yaw", step: 0.05, fmt: (v) => v.toFixed(2) },
@@ -490,8 +536,18 @@
       }
     }
     const pill = $("fStatus");
+    let text = st.error ? "Грешка в модела" : (FOLLOW_STATUS[st.status] || st.status);
+    if (st.status === "stopped" && st.stop_reason) text += ` (${st.stop_reason})`;
     pill.dataset.s = st.status;
-    pill.textContent = st.error ? "Грешка в модела" : (FOLLOW_STATUS[st.status] || st.status);
+    pill.textContent = text;
+    // banner over the video: the same state, readable from the stage
+    const banner = $("followBanner");
+    banner.hidden = !st.enabled || st.status === "loading";
+    banner.dataset.phase = st.phase || "off";
+    $("followBannerText").textContent = text;
+    const prog = st.phase === "armed" ? (st.raise_progress || 0) : 0;
+    $("followBannerBar").style.transform = `scaleX(${prog})`;
+    banner.querySelector(".fb-bar").hidden = st.phase !== "armed";
     $("fFps").textContent = `AI ${Math.round(st.fps || 0)} fps`;
     const f = (x) => (x >= 0 ? "+" : "−") + Math.abs(x).toFixed(2);
     $("fVx").textContent = (st.vx || 0).toFixed(2);

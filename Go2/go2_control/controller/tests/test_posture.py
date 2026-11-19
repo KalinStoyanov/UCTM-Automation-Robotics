@@ -230,3 +230,59 @@ class DemoWithPostureTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PoseModeTest(unittest.TestCase):
+    """Robot log 2026-11-19: Euler -> code 0 but no motion (FSM 100); BodyHeight -> code 3203."""
+
+    def setUp(self):
+        self.r = FakeRobot().start()  # standing + balanced
+        self.r.connect().result(timeout=2)
+
+    def tearDown(self):
+        self.r.close()
+
+    def sent(self):
+        return [(n, p) for _, n, p in self.r.sent]
+
+    def test_bodyheight_hidden_and_rejected(self):
+        self.assertNotIn("BodyHeight", R.available_posture())
+        self.assertIn("Euler", R.available_posture())
+        with self.assertRaises(ValueError):
+            self.r.posture("BodyHeight", {"data": -0.05})
+
+    def test_euler_enters_pose_mode_once(self):
+        self.r.posture("Euler", {"x": 0.1, "y": 0.0}).result(timeout=2)
+        self.r.posture("Euler", {"x": 0.0, "y": 0.1}).result(timeout=2)
+        self.assertEqual(self.sent(), [("Pose", {"data": True}),
+                                       ("Euler", {"x": 0.1, "y": 0.0, "z": 0.0}),
+                                       ("Euler", {"x": 0.0, "y": 0.1, "z": 0.0})])
+
+    def test_other_action_leaves_pose_mode_first(self):
+        self.r.posture("Euler", {"y": 0.1}).result(timeout=2)
+        self.r.clear()
+        self.r.action("Hello").result(timeout=2)
+        self.assertEqual(self.sent(), [("Pose", {"data": False}), ("Hello", None)])
+
+    def test_movement_leaves_pose_mode_first(self):
+        self.r.posture("Euler", {"y": 0.1}).result(timeout=2)
+        self.r.clear()
+        end = time.monotonic() + 0.4
+        while time.monotonic() < end:
+            self.r.set_velocity(0.3, 0, 0)
+            time.sleep(0.05)
+        names = self.r.names()
+        self.assertEqual(names[0], "Pose")
+        self.assertEqual(self.r.sent[0][2], {"data": False})
+        self.assertIn("Move", names)
+
+    def test_reset_returns_to_neutral_and_leaves_pose_mode(self):
+        self.r.posture("Euler", {"x": 0.1}).result(timeout=2)
+        self.r.clear()
+        self.r.posture_reset().result(timeout=2)
+        self.assertEqual(self.sent(), [("Euler", {"x": 0.0, "y": 0.0, "z": 0.0}), ("Pose", {"data": False})])
+
+    def test_reset_never_stands_a_lying_robot_up(self):
+        self.r.posture_state = LYING
+        self.r.posture_reset().result(timeout=2)
+        self.assertEqual(self.r.names(), [])
