@@ -191,3 +191,15 @@ Do these steps in order, with the robot on the floor, 2 m of free space around i
 - **"Фърмуерът иска AES ключ"**: only firmware ≥ 1.1.15. Do **not** update the robot before the demo.
 - **Video black or 0 FPS but connected**: restart the app. Only one process can hold the robot connection, so make sure `go2.py` or `go2_ai.py` is not running.
 - **Robot doesn't walk after Стани**: press **Баланс (3)**, then try again.
+
+## Tested on the robot 19 Nov 2026 (firmware 1.1.12)
+
+**Passed:**
+- Follow after one raised arm; stop on two raised arms or an open palm.
+- Victory gesture → Сърце.
+- Аварийно (Damp).
+- Obstacle avoidance on/off: the robot stops in front of a box or a person, during manual drive and during Follow, and moves on by itself after the obstacle is removed.
+
+**Known limits:**
+- Dance tricks cannot be interrupted by СТОП or Damp: the robot ignores commands while a trick runs (FSM state 1006). Do not demo them without 2 m of clear space.
+- The built-in avoidance stops in front of obstacles; it does not go around them.
