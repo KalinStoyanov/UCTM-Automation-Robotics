@@ -5,10 +5,10 @@ All components under `Go2/`, including `go2_control/`, `core/`, `applications/`,
 ## Current authoritative implementation (2026-11-19)
 
 - **Integrated operational implementation:** branch `go2-control`, directory `Go2/go2_control/`.
-- **Development version string in this branch:** `Go2/VERSION = 0.26.0-dev`.
-- **Last separately documented offline release:** `v0.25.0` (M25, 207 tests).
+- **Release version in this branch:** `Go2/VERSION = 0.26.0`.
+- **Previous offline release:** `v0.25.0` (M25, 207 tests).
 - **Hardware validation:** the operator reports the base and AI controllers tested on the real Go2 Air, and the integration complete. This is operator-reported validation, separate from automated regression evidence.
-- **Release status:** integrated development snapshot, not a newly tagged release. No tag or release number has been invented or advanced.
+- **Release status:** integrated v0.26.0 source release; annotated Git tag pending. No tag or release number has been invented or advanced.
 
 **Important:** the default `main` branch may lag behind `go2-control`. Do not infer current operational functionality from `main` alone. Keep the validated integrated controller unchanged when updating documentation.
 
