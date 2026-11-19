@@ -1,15 +1,14 @@
 # DD-M2 controller version-control guidance
 
-The authoritative versioning policy for the **entire Go2/DD-M2 software system** is [`Go2/docs/VERSIONING.md`](../docs/VERSIONING.md).
+See [the unified system policy](../docs/VERSIONING.md).
 
-The main motion controller, experimental posture controllers, AI modules, communications, safety logic, configurations and tests all share **one system release version** from `Go2/VERSION` and one Git commit snapshot. Controllers do not have independent release versions.
+**Current integrated controller:** `Go2/go2_control/` on branch `go2-control`, including base keyboard/joystick control, AI hand gestures, camera, person following, posture transitions and STOP/deadman logic. The operator confirmed physical testing of both base and AI controllers as of 2026-11-19.
 
-Controller files tracked in the same repository:
-
-- `Go2/core/control/remote_control.py` — main keyboard motion controller.
+Earlier components remain in the repository as historical or experimental implementations:
+- `Go2/core/control/remote_control.py` — earlier keyboard controller.
 - `Go2/experiments/ddm2_posture_controller.py` — experimental posture controller.
 - `Go2/experiments/ddm2_posture_logged.py` — diagnostic posture controller.
 
-Each controller change is committed to the same Git history. Experimental implementation descriptions such as "v3" are internal design iterations, **not** system release numbers. Runtime diagnostic logs under `results/` remain local unless deliberately shared for analysis.
+These are not the authoritative integrated web controller. They share the Go2 system version history rather than separate release numbers. The current `go2-control` branch contains `Go2/VERSION = 0.26.0-dev`; this documentation update does not issue a new release or tag.
 
-Local `/tmp/` copies on DDStation are **not** version-controlled. Move validated changes to these canonical repository paths and commit them. GitHub edits do not automatically update DDStation.
+Do not overwrite validated local source or assume `main` includes the integrated implementation. Record branch, commit SHA, firmware and test evidence for any later release. Keep runtime logs and credentials out of Git unless deliberately reviewed.
