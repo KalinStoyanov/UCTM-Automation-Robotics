@@ -9,6 +9,6 @@ Earlier components remain in the repository as historical or experimental implem
 - `Go2/experiments/ddm2_posture_controller.py` — experimental posture controller.
 - `Go2/experiments/ddm2_posture_logged.py` — diagnostic posture controller.
 
-These are not the authoritative integrated web controller. They share the Go2 system version history rather than separate release numbers. The current `go2-control` branch contains `Go2/VERSION = 0.26.0-dev`; this documentation update does not issue a new release or tag.
+These are not the authoritative integrated web controller. They share the Go2 system version history rather than separate release numbers. The current `go2-control` branch contains `Go2/VERSION = 0.26.0`; the v0.26.0 release is recorded in source; annotated Git tag pending.
 
 Do not overwrite validated local source or assume `main` includes the integrated implementation. Record branch, commit SHA, firmware and test evidence for any later release. Keep runtime logs and credentials out of Git unless deliberately reviewed.
