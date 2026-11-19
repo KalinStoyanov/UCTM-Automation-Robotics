@@ -1,58 +1,28 @@
-# Unified Go2 / DD-M2 software versioning
+# Unified Go2 / DD-M2 version control
 
-**Scope:** every software component under `Go2/` shares ONE system-level version.
+All components under `Go2/`, including `go2_control/`, `core/`, `applications/`, `experiments/`, tests, models and configuration, belong to **one software system**. The exact Git commit is the reproducible source snapshot.
 
-This includes:
-- `core/`: WebRTC transport, robot commands, posture and motion control, safety, sensor adapters.
-- `applications/`: DD-M2 AI applications and integration.
-- `experiments/`: posture and diagnostic controllers, trial implementations.
-- `tests/`, configuration, documentation and scripts that affect system behavior.
+## Current authoritative implementation (2026-11-19)
 
-## Source of truth
+- **Integrated operational implementation:** branch `go2-control`, directory `Go2/go2_control/`.
+- **Release version in this branch:** `Go2/VERSION = 0.26.0`.
+- **Previous offline release:** `v0.25.0` (M25, 207 tests).
+- **Hardware validation:** the operator reports the base and AI controllers tested on the real Go2 Air, and the integration complete. This is operator-reported validation, separate from automated regression evidence.
+- **Release status:** integrated v0.26.0 source release; annotated Git tag pending. No tag or release number has been invented or advanced.
 
-- `Go2/VERSION`: the most recently **released** system version (currently `0.25.0`).
-- `Go2/CHANGELOG.md`: released changes and the unreleased change set.
-- Git commit SHA: the **exact software snapshot**, including all controllers and other components.
-- Annotated Git tag `go2-vMAJOR.MINOR.PATCH` on a verified release commit; use the previously established legacy tag when applicable and do not move existing tags.
-- `Go2/tools/version_info.py`: report the current release baseline, commit SHA, and dirty working-tree state.
+**Important:** the default `main` branch may lag behind `go2-control`. Do not infer current operational functionality from `main` alone. Keep the validated integrated controller unchanged when updating documentation.
 
-A commit after a tagged release is **development code**. Its version is displayed as `<VERSION>+dev.<shortsha>` (and `.dirty` if local edits exist). This is a descriptive build ID, not a new SemVer release.
+## Version and snapshot rules
 
-## Version change rules (Semantic Versioning)
+1. Use the Git commit SHA plus branch and clean/dirty status to identify the exact implementation. Record the physical robot firmware and runtime platform separately.
+2. `Go2/VERSION` identifies the branch's version string. A `-dev` suffix indicates development; do not represent it as a finalized release.
+3. MAJOR: incompatible control/API change; MINOR: backward-compatible capability; PATCH: backward-compatible fix. A new release is declared only after explicit validation and approval.
+4. For an approved release, update `Go2/VERSION`, `Go2/CHANGELOG.md`, and a new `docs/releases/vX.Y.Z.md`; commit together and create a new annotated `go2-vX.Y.Z` tag. Never move existing tags.
+5. Keep historical offline test results distinct from operator-observed hardware tests and from untested capabilities.
+6. Do not overwrite robot-tested source or perform destructive merges/resets when synchronizing `go2-control` and `main`.
 
-- MAJOR: incompatible software/API/control contract change.
-- MINOR: backward-compatible new capability or major functional milestone.
-- PATCH: backward-compatible bug or safety fix without API break.
-- A tested milestone is released only after explicit release validation. An experimental controller being committed does not itself create a release.
-- Increment the single `Go2/VERSION` file **once per Go2 release**, not once per subsystem, and never silently overwrite a released tag.
+## Reproduction
 
-## Commit and release workflow
+From the repository root, inspect `git status --short`, `git log -1 --format='%H %s'`, and `Go2/VERSION`. The integrated controller's instructions and tests are in `Go2/go2_control/README.md`.
 
-1. Keep all authoritative source files inside `Go2/` and under Git; `/tmp` scripts are scratch copies only.
-2. From DDStation: `git status`, `git pull --ff-only` (resolve local differences first), and inspect `git diff`. Avoid overwriting robot-tested local edits.
-3. Run focused and regression tests against the entire system. Record test totals and hardware validation separately. Never describe offline tests as physical verification.
-4. Commit each substantive change with a descriptive scope, e.g. `go2(posture): log state transitions` or `go2(webrtc): handle reconnect failure`.
-5. For release: update `VERSION`, `CHANGELOG.md`, and `docs/releases/vX.Y.Z.md`; record safety limitations, tested firmware, hardware and commit SHA.
-6. Commit release files, then create an annotated tag `go2-vX.Y.Z` pointing to that same commit and push the commit and tag.
-7. Deployment and bug reports always record **version + full commit SHA + clean/dirty state**. A change anywhere under `Go2/` changes the build SHA.
-8. Check out a release tag or a specific commit to reconstruct all source components together. Restore environments and dependencies according to that snapshot's documented requirements.
-
-## Runtime data
-
-Do not commit robot telemetry, raw JSONL diagnostic sessions, model weights, credentials, virtual environments or local backups by default. The existing `.gitignore` excludes `results/`, environment files and model artifacts. Share selected scrubbed logs separately for diagnostics.
-
-## Safety
-
-A WebRTC API status 0 records command acceptance, not observed completion. Posture state inferred from previous commands must be labeled as such. Keep physical safety verification, independent STOP requirements and firmware compatibility distinct from source release numbers.
-
-## Example usage
-
-From DDStation inside `~/go2/Go2`:
-
-```bash
-python tools/version_info.py
-git status --short
-git log -1 --format='%H %s'
-```
-
-The historical `v0.25.0` offline baseline remains documented. Recent LIVE posture experiments are **unreleased** until a validated new Go2 system release is explicitly declared.
+A command acknowledgment confirms acceptance by the robot API, not necessarily completed physical motion. Safety verification and supervised hardware tests remain distinct from software release numbering.

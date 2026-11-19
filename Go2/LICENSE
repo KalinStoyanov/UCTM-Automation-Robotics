@@ -1,0 +1,53 @@
+DD-M2 SOURCE CODE LICENSE — RESTRICTED NON-COMMERCIAL USE
+Version 1.0 — 19 November 2026
+
+Copyright (c) 2026 DD-M2 Project Team
+Department of Automation
+University of Chemical Technology and Metallurgy (UCTM), Sofia, Bulgaria
+Faculty members and students
+
+1. Scope
+This license applies only to original DD-M2/Go2 source code and documentation
+authored by the UCTM project team and distributed in the Go2 directory,
+unless a specific file states otherwise. Third-party software, pretrained
+models, firmware, assets, and dependencies remain subject to their own terms.
+
+2. Permitted use
+Permission is granted, free of charge, to access, download, study, run,
+and modify the covered material solely for non-commercial education,
+academic research, and personal experimentation, provided that:
+(a) this license and all copyright and attribution notices are retained;
+(b) the origin of the material and any modifications are identified;
+(c) applicable third-party licenses are independently observed.
+
+3. Restrictions
+Without prior written authorization from the rights holder(s), users may not:
+(a) use the covered material for commercial purposes, including paid services,
+    commercial products, or commercial training and consulting;
+(b) redistribute, sublicense, publish modified versions, or incorporate the
+    covered material into publicly distributed software packages;
+(c) remove or misrepresent copyright, authorship, or license notices.
+Permission for academic use does not authorize deployment in a commercial
+environment.
+
+4. Safety and responsibility
+The software interfaces with a physical robot. Users are responsible for
+appropriate supervision, testing, operating conditions, compliance with
+applicable law, and any resulting physical or material damage.
+
+5. No warranty
+THE COVERED MATERIAL IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING MERCHANTABILITY, FITNESS FOR A PARTICULAR
+PURPOSE, AND NON-INFRINGEMENT. TO THE EXTENT PERMITTED BY LAW, THE AUTHORS
+AND RIGHTS HOLDERS SHALL NOT BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER
+LIABILITY ARISING FROM ITS USE.
+
+6. Permissions
+Requests for commercial use, redistribution, or other exceptions must be
+submitted to the rights holder(s) through the repository's official
+maintainer/contact channel. Authorization is effective only when given in
+writing by an authorized rights holder.
+
+7. License classification
+This is a source-available, restricted-use license. It is NOT an OSI-approved
+open-source license and does not grant unrestricted commercial use.
