@@ -7,6 +7,8 @@ an open palm (needs Жестове), or is lost for 2 s. СТОП / manual input
 
 Upper layer only: it calls robot.set_velocity() / robot.stop(), exactly like the keyboard.
 All safety below it (speed caps, 300 ms deadman, BalanceStand rule) still applies.
+Turning the mode on also switches on the robot's built-in obstacle avoidance
+(robot.set_avoidance); if the robot refuses it, the mode runs and is shown "без избягване".
 """
 from __future__ import annotations
 
@@ -282,6 +284,9 @@ class FollowMode:
             self._commanding = False
             self.last_disable = None
         self.detector.acquire("follow", pose=True)
+        set_avoidance = getattr(self.robot, "set_avoidance", None)
+        if set_avoidance is not None:
+            set_avoidance(True, "follow")  # result shown via avoid_status(); never blocks here
         if self._thread is None or not self._thread.is_alive():
             self._stop.clear()
             self._thread = threading.Thread(target=self._run, name="follow", daemon=True)
@@ -322,6 +327,7 @@ class FollowMode:
             status = "paused"
         fps = self.detector.fps if self._enabled else 0.0
         now = time.monotonic()
+        avoid = self._avoid()
         return {
             "phase": self.ctrl.state if self._enabled else "off",
             "raise_progress": round(self.ctrl.raise_progress(now), 2) if self._enabled else 0.0,
@@ -338,7 +344,12 @@ class FollowMode:
             "limits": LIMITS,
             "last_disable": self.last_disable,
             "error": self.detector.error,
+            "avoid": avoid,   # robot avoidance state: "on" | "enabling" | "failed" | "off" | None
         }
+
+    def _avoid(self) -> str | None:
+        status = getattr(self.robot, "avoid_status", None)
+        return status()["state"] if status is not None else None
 
     # ---------- worker ----------
     def _run(self) -> None:
@@ -375,8 +386,14 @@ class FollowMode:
                         log.exception("follow on_change")
             for ev in self.ctrl.events:
                 if ev == "lock":
-                    log.info("FOLLOW lock: one arm raised %.1f s", RAISE_HOLD)
-                    self._event("Следване: вдигната ръка, следвам", "ok")
+                    avoid = self._avoid()
+                    if avoid == "on":
+                        log.info("FOLLOW lock: one arm raised %.1f s (obstacle avoidance on)", RAISE_HOLD)
+                        self._event("Следване: вдигната ръка, следвам (с избягване)", "ok")
+                    else:
+                        log.warning("FOLLOW lock: one arm raised %.1f s, WITHOUT obstacle avoidance (%s)",
+                                    RAISE_HOLD, avoid)
+                        self._event("Следване: следвам БЕЗ избягване на препятствия", "danger")
             self.ctrl.events.clear()
             if cmd.kind == "stop":  # always honoured, even during an action pause
                 why = STOP_REASON_BG.get(self.ctrl.stop_reason, self.ctrl.stop_reason)

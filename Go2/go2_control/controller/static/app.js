@@ -239,11 +239,22 @@
     estop.dataset.holding = "false";
     keys.clear(); moveStick.release(); turnStick.release(); streaming = false;
     flash(estop);
+    if (!socketUp) {
+      // socket.io would queue the event and send Damp later, on reconnect: never do that
+      addFeed({ t: Date.now() / 1000, text: "АВАРИЙНО: няма връзка със сървъра, Damp НЕ е изпратен!", level: "danger" });
+      return;
+    }
     socket.emit("emergency", { held_ms: Math.round(held) }, (res) => {
-      if (res && !res.ok) toast("Аварийното не е изпратено");
+      if (!res || !res.ok) toast("Аварийното не е изпратено");
+      else if (res.code === 0) toast("Damp: роботът потвърди (код 0)");
+      else toast(`Damp: ${res.code == null || res.code === "timeout" ? "няма отговор от робота" : "код " + res.code}`);
     });
   }
-  estop.addEventListener("pointerdown", (e) => { e.preventDefault(); estop.setPointerCapture(e.pointerId); holdBegin(); });
+  estop.addEventListener("pointerdown", (e) => {
+    e.preventDefault();
+    holdBegin();  // first: a failing pointer capture must never cancel the hold
+    try { estop.setPointerCapture(e.pointerId); } catch (_) { /* keep holding without capture */ }
+  });
   for (const t of ["pointerup", "pointercancel", "lostpointercapture"]) estop.addEventListener(t, holdEnd);
   estop.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.repeat) { e.preventDefault(); holdBegin(); } });
   estop.addEventListener("keyup", (e) => { if (e.key === "Enter") holdEnd(); });
@@ -434,13 +445,39 @@
   }
 
   /* ---------------- AI ---------------- */
-  document.querySelectorAll(".switch").forEach((sw) => {
+  document.querySelectorAll(".switch[data-mode]").forEach((sw) => {
     sw.addEventListener("change", () => {
       sw._userAt = performance.now();
       socket.emit("ai", { mode: sw.dataset.mode, on: sw.checked });
       sw.closest(".ai-mode").dataset.on = String(sw.checked);
     });
   });
+
+  /* ---------------- obstacle avoidance (robot's built-in lidar avoidance) ---------------- */
+  const avoidSw = $("avoidSwitch");
+  avoidSw.addEventListener("change", () => {
+    avoidSw._userAt = performance.now();
+    socket.emit("avoid", { on: avoidSw.checked });
+    $("avoidBox").dataset.on = String(avoidSw.checked);
+  });
+  function renderAvoid(a, link) {
+    if (!a) return;
+    if (!avoidSw._userAt || performance.now() - avoidSw._userAt > 1500) {
+      avoidSw.checked = a.want;
+      $("avoidBox").dataset.on = String(a.want);
+    }
+    let state = a.state, text;
+    if (state === "on") text = `Включено · роботът потвърди (код ${a.code})`;
+    else if (state === "failed") text = `Избягването не работи · ${a.error}`;
+    else if (state === "enabling") text = "Включване… чакам отговор от робота";
+    else if (state === "disabling") text = "Изключване…";
+    else if (a.want && link !== "connected") { state = "waiting"; text = "Ще се включи при връзка с робота"; }
+    else text = a.code != null && a.code !== 0 ? `Изключено (код ${a.code})` : "Изключено";
+    const el = $("avoidStatus");
+    el.dataset.state = state;
+    el.textContent = text;
+    $("avoidBox").dataset.failed = String(a.state === "failed");
+  }
 
   function renderLegend() {
     const ul = $("gLegend");
@@ -555,6 +592,10 @@
     $("fVx").parentElement.dataset.active = String(st.vx > 0);
     $("fYaw").parentElement.dataset.active = String(st.vyaw !== 0);
     $("fSlow").hidden = !st.slow;
+    // follow without the robot's confirmed obstacle avoidance: say so, in red, in both places
+    const noAvoid = st.enabled && st.avoid !== "on";
+    $("fAvoid").hidden = !noAvoid;
+    $("followBannerAvoid").hidden = !noAvoid;
   }
 
   function renderGestures(st) {
@@ -650,6 +691,7 @@
       $("novideoText").textContent = t.state === "connecting" ? "Свързване с робота…"
         : t.state === "connected" ? "Чакам видео…" : "Няма видео";
     }
+    renderAvoid(t.avoid, t.state);
     renderAI(t.ai);
     renderDemo(t.demo);
   }

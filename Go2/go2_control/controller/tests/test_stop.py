@@ -83,7 +83,8 @@ class RobotStopTest(unittest.TestCase):
         self.assertEqual(self.r.emergency_damp().result(timeout=2), 0)
         self.assertEqual(self.r.names()[-1], "Damp")
         self.assertEqual(self.r.posture_state, R.LYING)
-        self.assertIn("АВАРИЙНО: Damp", self.r.events.texts())
+        self.assertTrue(any(t.startswith("АВАРИЙНО Damp → робот: OK") for t in self.r.events.texts()),
+                        self.r.events.texts())
         with self.assertRaises(ValueError):
             self.r.action("Damp")  # still not an ordinary action
         self.r.clear()
@@ -156,7 +157,8 @@ class StopButtonEndToEndTest(unittest.TestCase):
         self.assertEqual(res, {"ok": True, "code": 0})
         self.assertFalse(self.demo.running)
         self.assertFalse(self.follow.enabled)
-        self.assertEqual(self.r.names()[-1], "Damp")
+        motion = [n for n in self.r.names() if not n.startswith("Avoid")]  # avoidance config may finish later
+        self.assertEqual(motion[-1], "Damp")
 
     def test_log_history_sent_on_connect(self):
         self.r.events.add("тест")

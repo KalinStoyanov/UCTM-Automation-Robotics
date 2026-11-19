@@ -119,6 +119,7 @@
       </div>
       <div class="follow-banner" id="followBanner" data-phase="off" hidden aria-live="polite">
         <span id="followBannerText"></span>
+        <span class="fb-avoid" id="followBannerAvoid" hidden>без избягване</span>
         <i class="fb-bar" aria-hidden="true"><b id="followBannerBar"></b></i>
       </div>
       <div class="vel" id="vel" aria-live="off">
@@ -167,6 +168,15 @@
     <section class="panel ai" aria-labelledby="aiTitle">
       <h2 id="aiTitle">AI режими</h2>
 
+      <div class="ai-mode avoid" id="avoidBox" data-on="false">
+        <label class="switch-row">
+          <svg class="ic"><use href="#i-radio"/></svg>
+          <span class="ai-name">Избягване на препятствия</span>
+          <input type="checkbox" class="switch" id="avoidSwitch">
+        </label>
+        <p class="avoid-status" id="avoidStatus" data-state="off">Изключено</p>
+      </div>
+
       <div class="ai-mode" id="aiGestures" data-on="false">
         <label class="switch-row">
           <svg class="ic"><use href="#i-hello"/></svg>
@@ -199,6 +209,9 @@
             <span><i>vx</i><b class="num" id="fVx">0.00</b></span>
             <span><i>ω</i><b class="num" id="fYaw">+0.00</b></span>
           </div>
+          <p class="warn-line danger" id="fAvoid" hidden>
+            <svg class="ic"><use href="#i-triangle-alert"/></svg><span>Без избягване на препятствия</span>
+          </p>
           <p class="warn-line" id="fSlow" hidden>
             <svg class="ic"><use href="#i-triangle-alert"/></svg><span>AI под 5 FPS: скорост до 0.15 м/с</span>
           </p>

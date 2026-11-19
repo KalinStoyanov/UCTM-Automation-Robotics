@@ -3,6 +3,7 @@
 Run: .venv/bin/python -m unittest discover -s controller/tests -v
 """
 import asyncio
+import json
 import threading
 import time
 import unittest
@@ -22,6 +23,7 @@ class FakeRobot(R.BaseRobot):
         self.silent = silent
         self.codes = {}   # command name -> reply code (default 0)
         self.delays = {}  # command name -> seconds until the reply
+        self.data = {"AvoidGet": {"enable": True}}  # command name -> reply data (robot fw: JSON string)
         self._sent_lock = threading.Lock()
 
     async def _open_transport(self):
@@ -39,6 +41,8 @@ class FakeRobot(R.BaseRobot):
         if not self.silent:
             code = self.codes.get(name, 0)
             reply = {"data": {"header": {"status": {"code": code}}}}
+            if name in self.data:
+                reply["data"]["data"] = json.dumps(self.data[name])
             delay = self.delays.get(name, 0)  # e.g. a trick that answers only when it finishes
             if delay:
                 self._loop.call_later(delay, lambda: fut.done() or fut.set_result(reply))

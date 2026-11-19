@@ -18,7 +18,8 @@ from typing import Any
 
 import numpy as np
 
-from unitree_webrtc_connect.constants import DATA_CHANNEL_TYPE, RTC_TOPIC, SPORT_CMD, SPORT_CMD_MCF
+from unitree_webrtc_connect.constants import (DATA_CHANNEL_TYPE, OBSTACLES_AVOID_API, RTC_TOPIC, SPORT_CMD,
+                                             SPORT_CMD_MCF)
 
 from .events import EventLog
 from .timing import ACTION_WAIT, TRICKS
@@ -73,7 +74,23 @@ ACTION_GROUPS = {"posture": "Поза", "tricks": "Трикове"}
 # Bulgarian names for the operator log.
 LABELS = {n: lbl for n, lbl, _, _ in ACTION_CATALOG}
 LABELS.update({"StopMove": "StopMove", "Move": "Движение", "Euler": "Наклон", "BodyHeight": "Височина",
-               "Damp": "Damp", "Pose": "Режим поза"})
+               "Damp": "Damp", "Pose": "Режим поза",
+               "AvoidSwitch": "Избягване вкл/изкл", "AvoidGet": "Избягване: проверка",
+               "AvoidRemote": "Избягване: движение от приложението", "AvoidMove": "Движение с избягване"})
+
+# Built-in lidar obstacle avoidance (the robot's own service, no lidar decoding here).
+# Topic rt/api/obstacles_avoid/request (library: RTC_TOPIC["OBSTACLES_AVOID"], OBSTACLES_AVOID_API;
+# same ids as Unitree SDK2 ObstaclesAvoidClient). The service only filters motion that goes
+# THROUGH it: its own MOVE (1003) once USE_REMOTE_COMMAND_FROM_API (1004) is on. The plain sport
+# Move (rt/api/sport/request 1008) is a different service and bypasses avoidance, so while
+# avoidance is on every Move goes out as AvoidMove instead (same 10 Hz, same deadman).
+AVOID_CMD = {
+    "AvoidSwitch": OBSTACLES_AVOID_API["SWITCH_SET"],                   # {"enable": bool}
+    "AvoidGet": OBSTACLES_AVOID_API["SWITCH_GET"],                      # -> data {"enable": bool}
+    "AvoidMove": OBSTACLES_AVOID_API["MOVE"],                           # {"x","y","yaw","mode":0}, no reply
+    "AvoidRemote": OBSTACLES_AVOID_API["USE_REMOTE_COMMAND_FROM_API"],  # {"is_remote_commands_from_api": bool}
+}
+AVOID_ZERO = {"x": 0.0, "y": 0.0, "yaw": 0.0, "mode": 0}
 
 
 def label(name: str) -> str:
@@ -265,6 +282,15 @@ class BaseRobot:
         self._move_last_code_at = 0.0
         self._move_warn_at = 0.0
         self._move_burst_at = 0.0
+        self._damped = False          # after АВАРИЙНО: no automatic standing up for movement
+        self._damped_note_at = 0.0
+        # obstacle avoidance (see AVOID_CMD)
+        self._avoid_want = False      # operator / follow asked for it
+        self._avoid_state = "off"     # off | enabling | on | failed | disabling
+        self._avoid_route = False     # Moves go out as AvoidMove (only after the robot confirmed)
+        self._avoid_code: Any = None  # reply code of the last avoidance request
+        self._avoid_error = ""
+        self._avoid_lock = asyncio.Lock()
 
     # ---------- lifecycle ----------
     def start(self) -> "BaseRobot":
@@ -309,6 +335,9 @@ class BaseRobot:
         self._want_connected = False
         if self._state == "connected":
             await self._send("StopMove")
+            if self._avoid_route:  # hand avoidance back to the robot / Unitree app
+                await self._send("AvoidRemote", {"is_remote_commands_from_api": False})
+        self._avoid_off_locally()
         await self._close_transport()
         self._state = "disconnected"
 
@@ -373,6 +402,15 @@ class BaseRobot:
             self._pending_stop = False
         return self._submit(self._do_stop(note))
 
+    def set_avoidance(self, on: bool, source: str = "toggle"):
+        """Built-in obstacle avoidance ON/OFF. ON is confirmed step by step from the robot's
+        replies; any refusal -> state "failed" (Moves stay on the plain sport Move)."""
+        return self._submit(self._do_avoid(bool(on), source))
+
+    def avoid_status(self) -> dict[str, Any]:
+        return {"want": self._avoid_want, "state": self._avoid_state, "active": self._avoid_route,
+                "code": self._avoid_code, "error": self._avoid_error}
+
     def latest_frame(self) -> tuple[int, np.ndarray | None]:
         with self._frame_cond:
             return self._frame_seq, self._frame
@@ -399,6 +437,8 @@ class BaseRobot:
             "posture": self.posture_state,
             "posture_label": POSTURE_LABEL.get(self.posture_state, self.posture_state),
             "chain": self._plan_busy,
+            "avoid": self.avoid_status(),
+            "damped": self._damped,
         })
         return t
 
@@ -422,13 +462,15 @@ class BaseRobot:
         """Put a request on the wire right now; returns (reply future | None, t0, code if failed)."""
         if name == "StopMove":
             self._move_burst_at = 0.0  # the next Move starts a new burst ("start" log line)
+        if name in ("StopMove", "Damp") and (self._avoid_route or self._avoid_state in ("enabling", "disabling")):
+            self._avoid_zero()  # avoidance must not keep the last AvoidMove velocity
         try:
             return self._transmit(name, param, want_reply=True), time.monotonic(), "not connected"
         except Exception as e:  # noqa: BLE001
             return None, time.monotonic(), f"error: {e}"
 
     async def _await_reply(self, name: str, param: dict | None, fut, t0: float, code: Any,
-                           ui: bool = True) -> Any:
+                           ui: bool = True, out: dict | None = None) -> Any:
         if fut is not None:
             done, _ = await asyncio.wait({fut}, timeout=REPLY_TIMEOUT)
             if not done:
@@ -439,6 +481,8 @@ class BaseRobot:
             else:
                 try:
                     code = self._reply_code(fut.result())
+                    if out is not None:
+                        out["reply"] = fut.result()
                 except Exception as e:  # noqa: BLE001
                     code = f"error: {e}"
         ms = (time.monotonic() - t0) * 1000
@@ -470,34 +514,38 @@ class BaseRobot:
             return self._busy_name
         return None
 
-    async def _send(self, name: str, param: dict | None = None, ui: bool = True) -> Any:
+    async def _send(self, name: str, param: dict | None = None, ui: bool = True,
+                    out: dict | None = None) -> Any:
         """Send now and await the reply (max REPLY_TIMEOUT). Never used for Move."""
         if name in TRICKS:
             self._busy_name, self._busy_until = name, time.monotonic() + self.waits.get(name, 0.0)
-        return await self._await_reply(name, param, *self._issue(name, param), ui=ui)
+        return await self._await_reply(name, param, *self._issue(name, param), ui=ui, out=out)
 
     def _send_bg(self, name: str, param: dict | None = None, ui: bool = False) -> None:
         """Send now (synchronously, so wire order = call order); await + log the reply in a task."""
         self._loop.create_task(self._await_reply(name, param, *self._issue(name, param), ui=ui))
 
     def _send_move(self, vel: tuple[float, float, float]) -> None:
-        """Fire-and-forget Move. Logged at most once per second."""
-        param = {"x": vel[0], "y": vel[1], "z": vel[2]}
+        """Fire-and-forget Move (AvoidMove while avoidance is on). Logged at most once per second."""
+        if self._avoid_route:
+            name, param = "AvoidMove", {"x": vel[0], "y": vel[1], "yaw": vel[2], "mode": 0}
+        else:
+            name, param = "Move", {"x": vel[0], "y": vel[1], "z": vel[2]}
         try:
-            self._transmit("Move", param, want_reply=False)
+            self._transmit(name, param, want_reply=False)
             self._move_sent += 1
         except Exception as e:  # noqa: BLE001
-            log.warning("CMD Move send failed: %s", e)
-        self._telemetry.update(last_command="Move", last_code=self._move_last_code, last_command_at=time.time())
+            log.warning("CMD %s send failed: %s", name, e)
+        self._telemetry.update(last_command=name, last_code=self._move_last_code, last_command_at=time.time())
         now = time.monotonic()
         if now - self._move_burst_at > 0.5:  # first Move of a new movement
-            log.info("CMD Move        %s -> start", self._fmt(param))
+            log.info("CMD %-12s%s -> start", name, self._fmt(param))
             self._move_sent, self._move_log_at = 0, now
         elif now - self._move_log_at >= 1.0:
             reply = "no reply" if self._move_last_code is None or now - self._move_last_code_at > 1.5 \
                 else f"last reply code={self._move_last_code}"
-            log.info("CMD Move        %s -> %d sent in %.1f s, %s",
-                     self._fmt(param), self._move_sent, now - self._move_log_at, reply)
+            log.info("CMD %-12s%s -> %d sent in %.1f s, %s",
+                     name, self._fmt(param), self._move_sent, now - self._move_log_at, reply)
             self._move_sent, self._move_log_at = 0, now
         self._move_burst_at = now
 
@@ -515,6 +563,9 @@ class BaseRobot:
 
     async def _do_action(self, name: str, param: dict | None = None) -> Any:
         self.last_action_at = time.monotonic()
+        if self._damped:
+            self._damped = False  # an explicit command after АВАРИЙНО: posture logic may act again
+            self.events.add("След Аварийно: ръчна команда, движението е разрешено отново")
         with self._lock:
             had_vel = self._vel != (0.0, 0.0, 0.0)
             self._vel = (0.0, 0.0, 0.0)
@@ -666,16 +717,108 @@ class BaseRobot:
         return self._submit(self._do_damp())
 
     async def _do_damp(self) -> Any:
+        """Damp goes on the wire at once: no posture chain, no settle wait, no StopMove first.
+        Afterwards movement never stands the robot up by itself (see _damped)."""
         self._moving = False
-        self.events.add("АВАРИЙНО: Damp", "danger")
+        self._damped = True  # before anything else: a velocity arriving now must not stand it up
         if self._plan_busy and self._plan_task is not None:
             self._plan_task.cancel()
             self._plan_busy = False
-        code = await self._send("Damp")
+        trick = self._trick_running()
+        t0 = time.monotonic()
+        code = await self._send("Damp", ui=False)
+        ms = (time.monotonic() - t0) * 1000
+        log.warning("EMERGENCY Damp -> code=%s (%.0f ms)%s", code, ms, f" during {trick}" if trick else "")
+        self.events.add(f"АВАРИЙНО Damp → робот: {code_text(code)} ({ms:.0f} ms)", "danger")
         if code in (0, "timeout"):
             self.posture_state, self._needs_balance = LYING, True
-        self._loop.call_later(STOP_CHECK_AFTER, self._report_after_stop, self._busy_name or "Damp")
+        self._loop.call_later(STOP_CHECK_AFTER, self._report_after_stop, trick or "Damp")
         return code
+
+    # ---------- obstacle avoidance ----------
+    def _avoid_zero(self) -> None:
+        """Zero velocity to the avoidance service (fire-and-forget, never awaited)."""
+        try:
+            self._transmit("AvoidMove", dict(AVOID_ZERO), want_reply=False)
+        except Exception as e:  # noqa: BLE001
+            log.warning("CMD AvoidMove zero failed: %s", e)
+
+    def _avoid_off_locally(self) -> None:
+        """Connection gone: robot side unknown. Re-enabled on reconnect while still wanted."""
+        self._avoid_route = False
+        if self._avoid_state != "failed":
+            self._avoid_state = "off"
+
+    async def _do_avoid(self, on: bool, source: str) -> Any:
+        self._avoid_want = on
+        async with self._avoid_lock:
+            if self._avoid_want != on:
+                return None  # a newer toggle replaced this one
+            if on and self._avoid_state == "on":
+                return 0     # already confirmed (e.g. follow turned on after the toggle)
+            return await (self._avoid_enable(source) if on else self._avoid_disable(source))
+
+    async def _avoid_enable(self, source: str) -> Any:
+        if self._state != "connected":
+            self._avoid_state, self._avoid_error = "off", ""
+            self.events.add("Избягване: ще се включи при връзка с робота", "warn")
+            return "not connected"
+        self._avoid_state, self._avoid_route, self._avoid_error = "enabling", False, ""
+        log.info("AVOID enabling (%s)", source)
+        code = await self._send("AvoidSwitch", {"enable": True}, ui=False)
+        if code != 0:
+            return self._avoid_fail("AvoidSwitch", code)
+        out: dict = {}
+        code = await self._send("AvoidGet", None, ui=False, out=out)
+        enabled = self._avoid_enabled_from(out.get("reply"))
+        log.info("AVOID state from robot: enable=%s", enabled)
+        if code != 0:
+            return self._avoid_fail("AvoidGet", code)
+        if enabled is not True:
+            return self._avoid_fail("AvoidGet", code, f"роботът отчита enable={enabled}")
+        code = await self._send("AvoidRemote", {"is_remote_commands_from_api": True}, ui=False)
+        if code != 0:
+            return self._avoid_fail("AvoidRemote", code)
+        self._avoid_state, self._avoid_route, self._avoid_code = "on", True, 0
+        log.info("AVOID ON (%s): robot confirmed, Moves now go out as AvoidMove", source)
+        self.events.add("Избягване на препятствия: ВКЛ (роботът потвърди, код 0)", "ok")
+        return 0
+
+    def _avoid_fail(self, step: str, code: Any, detail: str | None = None) -> Any:
+        self._avoid_state, self._avoid_route, self._avoid_code = "failed", False, code
+        self._avoid_error = f"{label(step)}: {detail or code_text(code)}"
+        log.error("AVOID FAILED at %s -> code=%s%s (Moves stay on sport Move, NO avoidance)",
+                  step, code, f" ({detail})" if detail else "")
+        self.events.add(f"Избягването не работи ({self._avoid_error})", "danger")
+        return code
+
+    async def _avoid_disable(self, source: str) -> Any:
+        was = self._avoid_route
+        self._avoid_route = False  # the next Move goes out as the plain sport Move again
+        if was:
+            self._avoid_zero()
+        if self._state != "connected":
+            self._avoid_state, self._avoid_error = "off", ""
+            return "not connected"
+        self._avoid_state = "disabling"
+        c1 = await self._send("AvoidRemote", {"is_remote_commands_from_api": False}, ui=False)
+        c2 = await self._send("AvoidSwitch", {"enable": False}, ui=False)
+        self._avoid_state, self._avoid_code, self._avoid_error = "off", c2, ""
+        log.info("AVOID OFF (%s): api -> code=%s, switch -> code=%s", source, c1, c2)
+        self.events.add(f"Избягване на препятствия: ИЗКЛ ({code_text(c2)})", "info" if c2 == 0 else "warn")
+        return c2
+
+    @staticmethod
+    def _avoid_enabled_from(reply: Any) -> bool | None:
+        """SWITCH_GET reply: data.data is {"enable": bool} (dict or JSON string)."""
+        data = ((reply or {}).get("data") or {}).get("data")
+        if isinstance(data, str):
+            try:
+                data = json.loads(data)
+            except ValueError:
+                return None
+        v = data.get("enable") if isinstance(data, dict) else None
+        return bool(v) if v in (True, False, 0, 1) else None
 
     async def _control_loop(self) -> None:
         """10 Hz movement loop. Nothing in here awaits the robot."""
@@ -701,6 +844,11 @@ class BaseRobot:
                 if vel == (0.0, 0.0, 0.0) or self._state != "connected":
                     next_move = 0.0
                     continue
+                if self._damped:  # after АВАРИЙНО only an explicit action may stand the robot up
+                    if now - self._damped_note_at > 3.0:
+                        self._damped_note_at = now
+                        self.events.add("След Аварийно движението е блокирано: натисни Стани или Възстанови", "warn")
+                    continue
                 if self._plan_busy:
                     continue  # a posture chain is running: hold Moves until it is done
                 if self.posture_state != STANDING or self._needs_balance or self._pose_mode:
@@ -723,6 +871,7 @@ class BaseRobot:
                     log.warning("connection lost")
                     self._state = "disconnected"
                     self._error = "Връзката с робота прекъсна"
+                    self._avoid_off_locally()
                     await self._close_transport()
                 if self._want_connected and self._state in ("disconnected", "error"):
                     await asyncio.sleep(2.0)
@@ -740,6 +889,8 @@ class BaseRobot:
             await self._open_transport()
             self._state = "connected"
             log.info("connected")
+            if self._avoid_want:  # (re)connected: the robot side must be switched on again
+                self._loop.create_task(self._do_avoid(True, "reconnect"))
         except Exception as e:  # noqa: BLE001
             self._state = "error"
             self._error = self._describe_error(e)
@@ -763,7 +914,8 @@ class BaseRobot:
         return True
 
     def _transmit(self, name: str, param: dict | None, want_reply: bool) -> "asyncio.Future | None":
-        """Put one sport request on the wire *now* (loop thread). Returns a reply future
+        """Put one request on the wire *now* (loop thread): SPORT_CMD names on the sport topic,
+        AVOID_CMD names on the obstacle-avoidance topic. Returns a reply future
         when want_reply, else None. Must not await."""
         raise NotImplementedError
 
@@ -827,10 +979,13 @@ class RobotSession(BaseRobot):
         if conn is None or ch is None or ch.readyState != "open":
             return None  # publish_without_callback would drop it silently anyway
         ps = conn.datachannel.pub_sub
-        topic = RTC_TOPIC["SPORT_MOD"]
+        if name in AVOID_CMD:
+            topic, api_id = RTC_TOPIC["OBSTACLES_AVOID"], AVOID_CMD[name]
+        else:
+            topic, api_id = RTC_TOPIC["SPORT_MOD"], SPORT_CMD[name]
         req_id = int(time.time() * 1000) % 2147483648 + random.randint(0, 1000)
         payload = {
-            "header": {"identity": {"id": req_id, "api_id": SPORT_CMD[name]}},
+            "header": {"identity": {"id": req_id, "api_id": api_id}},
             "parameter": json.dumps(param) if param is not None else "",
         }
         fut = None
@@ -879,9 +1034,10 @@ class SimRobot(BaseRobot):
         "RiseSit": 6, "Hello": 1, "Stretch": 1, "Dance1": 1, "Dance2": 1, "StopMove": 1, "Move": 3,
     }
 
-    def __init__(self, camera: int | str | None = "auto") -> None:
+    def __init__(self, camera: int | str | None = "auto", avoid_code: int = 0) -> None:
         super().__init__()
         self.camera = camera
+        self.avoid_code = avoid_code  # --sim-avoid-code 3203: rehearse a robot that refuses avoidance
         self._cap_stop = threading.Event()
         self._cap_thread: threading.Thread | None = None
         self._battery = 92.0
@@ -912,7 +1068,12 @@ class SimRobot(BaseRobot):
             self._loop.call_later(delay, self._on_move_reply, 0)  # pretend the robot answers Move
             return None
         fut = self._loop.create_future()
-        self._loop.call_later(delay, lambda: fut.done() or fut.set_result({"data": {"header": {"status": {"code": 0}}}}))
+        reply: dict = {"data": {"header": {"status": {"code": 0}}}}
+        if name == "AvoidSwitch" and self.avoid_code:
+            reply["data"]["header"]["status"]["code"] = self.avoid_code
+        if name == "AvoidGet":
+            reply["data"]["data"] = json.dumps({"enable": True})
+        self._loop.call_later(delay, lambda: fut.done() or fut.set_result(reply))
         return fut
 
     def _capture(self) -> None:

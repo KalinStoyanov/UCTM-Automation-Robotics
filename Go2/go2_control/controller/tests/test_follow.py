@@ -293,7 +293,9 @@ class FollowIntegrationTest(unittest.TestCase):
         time.sleep(0.2)
 
     def moves(self):
-        return [p for _, n, p in self.robot.sent if n == "Move"]
+        """Velocity commands, sport Move or AvoidMove (follow turns avoidance on), as x/y/z."""
+        return [p if n == "Move" else {"x": p["x"], "y": p["y"], "z": p["yaw"]}
+                for _, n, p in self.robot.sent if n in ("Move", "AvoidMove")]
 
     def test_follow_drives_robot_through_set_velocity(self):
         self.start_following(person(0.25, 0.25))  # left and far
@@ -339,7 +341,8 @@ class FollowIntegrationTest(unittest.TestCase):
         self.det.set_persons([person(0.25, 0.25, arms=0)])
         self.client.emit("ai", {"mode": "follow", "on": True}, callback=True)
         time.sleep(1.0)
-        self.assertEqual(self.robot.names(), [])  # no Move, and no StopMove either
+        # no Move, and no StopMove either; only the avoidance switch-on requests
+        self.assertEqual(self.robot.names(), ["AvoidSwitch", "AvoidGet", "AvoidRemote"])
         self.assertEqual(self.follow.state()["phase"], "armed")
         self.assertEqual(self.follow.state()["status"], "armed")
 
@@ -375,12 +378,12 @@ class FollowIntegrationTest(unittest.TestCase):
         self.assertEqual(self.follow.state()["phase"], "stopped")
         self.assertEqual(self.follow.state()["stop_reason"], "изгубих те")
         names = self.robot.names()
-        last_move = max(i for i, n in enumerate(names) if n == "Move")
+        last_move = max(i for i, n in enumerate(names) if n in ("Move", "AvoidMove"))
         self.assertEqual(names[last_move + 1:].count("StopMove"), 1, names[last_move:])
 
     def test_lock_is_logged(self):
         self.start_following(person(0.3, 0.3))
-        self.assertIn("Следване: вдигната ръка, следвам", self.robot.events.texts())
+        self.assertIn("Следване: вдигната ръка, следвам (с избягване)", self.robot.events.texts())
 
     def test_slow_detector_warns_and_caps_vx(self):
         self.det.fps = 3.0

@@ -255,6 +255,13 @@ def create_app(robot: BaseRobot, detector=None, push_telemetry_task: bool = True
         socketio.emit("telemetry", _telemetry())
         return {"ok": True}
 
+    @socketio.on("avoid")
+    def on_avoid(data):
+        """Built-in obstacle avoidance ON/OFF. Returns at once; the robot's answer arrives
+        through telemetry (avoid.state / avoid.code) and the operator log."""
+        robot.set_avoidance(bool((data or {}).get("on")), "toggle")
+        return {"ok": True}
+
     @socketio.on("follow_config")
     def on_follow_config(data):
         return {"ok": True, "config": follow.update_config(data or {})}
@@ -323,10 +330,13 @@ def main(argv=None) -> None:
     ap.add_argument("--host", default="0.0.0.0")
     ap.add_argument("--port", type=int, default=8080)
     ap.add_argument("--no-connect", action="store_true", help="do not connect on startup")
+    ap.add_argument("--sim-avoid-code", type=int, default=0,
+                    help="--sim only: answer obstacle avoidance ON with this code (e.g. 3203)")
     args = ap.parse_args(argv)
 
     setup_logging()
-    robot: BaseRobot = SimRobot(None if args.camera == "none" else args.camera) if args.sim else RobotSession()
+    robot: BaseRobot = (SimRobot(None if args.camera == "none" else args.camera, avoid_code=args.sim_avoid_code)
+                        if args.sim else RobotSession())
     robot.start()
     log.info("Go2 Control %s | actions: %s", "SIM" if args.sim else "ROBOT",
              ", ".join(a["name"] for a in available_actions()))

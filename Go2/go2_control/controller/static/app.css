@@ -423,6 +423,16 @@ kbd {
 .warn-line { display: flex; align-items: center; gap: 8px; margin: 10px 0 0; font-size: 12px; font-weight: 650; color: var(--warn); }
 .warn-line[hidden] { display: none; }
 .warn-line .ic { width: 16px; height: 16px; }
+.warn-line.danger { color: var(--danger); }
+
+/* obstacle avoidance: the status line is always visible, it is the robot's answer */
+.avoid-status { margin: 0; padding: 0 12px 11px 40px; font-size: 12px; font-weight: 650; color: var(--text-3); }
+.avoid-status[data-state="on"] { color: var(--ok); }
+.avoid-status[data-state="enabling"], .avoid-status[data-state="disabling"], .avoid-status[data-state="waiting"] { color: var(--warn); }
+.avoid-status[data-state="failed"] { color: var(--danger); font-weight: 750; }
+.ai-mode.avoid[data-failed="true"] { border-color: rgba(255, 75, 78, 0.55); }
+.fb-avoid { font-size: 12px; font-weight: 800; color: #fff; background: var(--danger); padding: 1px 7px; border-radius: 6px; }
+.fb-avoid[hidden] { display: none; }
 .tune { margin-top: 10px; border-top: 1px solid var(--line); padding-top: 8px; }
 .tune summary { cursor: pointer; font-size: 12px; font-weight: 700; color: var(--text-2); list-style: none; display: flex; align-items: center; gap: 6px; padding: 2px 0; }
 .tune summary::-webkit-details-marker { display: none; }
@@ -533,7 +543,7 @@ kbd {
   min-height: 42px; border-radius: var(--r); cursor: pointer;
   font-size: 14px; font-weight: 750; color: #ffc4c5;
   background: rgba(255, 75, 78, 0.08); border: 1px dashed rgba(255, 75, 78, 0.6);
-  touch-action: none; user-select: none; -webkit-user-select: none;
+  touch-action: none; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
 }
 .estop-btn .ic { color: var(--danger); }
 .estop-fill {
