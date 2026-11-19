@@ -1,0 +1,6 @@
+# Go2 Control: local runtime files
+logs/
+__pycache__/
+.venv/
+# Go2/.gitignore ignores *.pt; the YOLO11n weights are required offline, so keep this one file
+!models/yolo11n.pt
