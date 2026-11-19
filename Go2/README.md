@@ -17,6 +17,6 @@ The detailed controls, configuration, startup and hardware checklist are maintai
 
 ## Version control
 
-The current **authoritative integrated code snapshot** is on the `go2-control` branch, not `main`. The branch's `Go2/VERSION` is `0.26.0-dev`, a development identifier rather than an approved release. The historical offline release `v0.25.0` remains a separate baseline.
+The current **authoritative integrated code snapshot** is on the `go2-control` branch, not `main`. The branch's `Go2/VERSION` is `0.26.0`, a release version. The historical offline release `v0.25.0` remains a separate baseline. See [v0.26.0 release record](docs/releases/v0.26.0.md).
 
 See [docs/VERSIONING.md](docs/VERSIONING.md) and [CHANGELOG.md](CHANGELOG.md). A new release tag and finalized version number require an explicit release decision; no existing tag is moved.
