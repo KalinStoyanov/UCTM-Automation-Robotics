@@ -210,6 +210,170 @@ class DampTest(unittest.TestCase):
         self.assertFalse(self.r.telemetry()["damped"])
 
 
+class RecSim(R.SimRobot):
+    """SimRobot (test-pattern video, 20 Hz odometry, obstacle model) that records what goes on the wire."""
+
+    def __init__(self):
+        super().__init__(camera=None)
+        self.sent = []
+
+    def _transmit(self, name, param, want_reply):
+        self.sent.append((time.monotonic(), name, dict(param) if param else None))
+        return super()._transmit(name, param, want_reply)
+
+    def names(self, since=0.0):
+        return [n for t, n, _ in list(self.sent) if t >= since]
+
+    def x(self):
+        return self._sim_pose[0]
+
+
+class AvoidStallSimTest(unittest.TestCase):
+    """Robot test 2026-11-19: W held toward a box -> stop (wanted); box removed, W still held ->
+    forward never resumed. Reproduced with the simulator's obstacle model (sim_latch = the suspected
+    robot-side latch). Forward must resume by itself; no motion may go out unfiltered."""
+
+    def setUp(self):
+        self.r = RecSim().start()
+        self.r.connect().result(timeout=3)
+        self.assertEqual(self.r.set_avoidance(True).result(timeout=3), 0)
+        time.sleep(0.2)
+
+    def tearDown(self):
+        self.r.close()
+
+    def hold(self, vx, seconds, until=None):
+        end = time.monotonic() + seconds
+        while time.monotonic() < end:
+            self.r.set_velocity(vx, 0, 0)
+            if until and until():
+                return True
+            time.sleep(0.05)
+        return False
+
+    def assert_only_filtered_motion(self):
+        names = self.r.names()
+        self.assertNotIn("Move", names)  # never the plain sport Move (bypasses avoidance)
+        self.assertNotIn({"enable": False}, [p for _, n, p in self.r.sent if n == "AvoidSwitch"])
+
+    def blocked_then_clear(self, latch):
+        self.r.sim_obstacle, self.r.sim_latch = True, latch
+        with self.assertLogs("go2", "INFO") as cm:
+            self.hold(0.3, 1.6)
+            self.assertLess(self.r.x(), 0.02)  # stopped in front of the box
+            self.r.sim_obstacle = False      # box removed, W still held
+            t0 = time.monotonic()
+            moved = self.hold(0.3, R.REARM_GAP + R.STALL_S + 1.5, until=lambda: self.r.x() > 0.3)
+            took = time.monotonic() - t0
+            self.hold(0.3, R.STALL_S + 0.2)  # long enough for the watch to see motion again
+        self.assertTrue(moved, f"forward did not resume, x={self.r.x():.2f}")
+        self.assertLess(took, R.REARM_GAP + R.STALL_S + 1.0)
+        out = "\n".join(cm.output)
+        self.assertIn("AVOID STALL: commanding x=+0.30", out)
+        self.assertIn("AVOID RESUMED", out)
+        self.assert_only_filtered_motion()
+        return out
+
+    def test_latched_forward_resumes_after_rearm(self):
+        out = self.blocked_then_clear(latch=True)
+        self.assertIn("AVOID REARM #", out)
+        i = out.index("AVOID REARM #")
+        self.assertIn("done: robot reported enable=True", out[i:])
+        self.assertIn("Избягване: роботът спря пред препятствие", self.r.events.texts())
+        self.assertIn("Избягване: пътят е свободен, роботът продължава", self.r.events.texts())
+
+    def test_unlatched_forward_resumes(self):
+        self.blocked_then_clear(latch=False)
+
+    def test_obstacle_still_there_never_moves_and_rearm_is_rate_limited(self):
+        self.r.sim_obstacle, self.r.sim_latch = True, True
+        t0 = time.monotonic()
+        self.hold(0.3, 7.0)
+        self.assertLess(self.r.x(), 0.02)
+        enables = [p for t, n, p in self.r.sent if n == "AvoidSwitch" and t >= t0]
+        # first rearm after STALL_S, then at most one per REARM_GAP
+        self.assertTrue(1 <= len(enables) <= 1 + int((7.0 - R.STALL_S) / R.REARM_GAP), enables)
+        self.assertTrue(all(e == {"enable": True} for e in enables))
+        self.assert_only_filtered_motion()
+
+    def test_stop_and_deadman_still_work_during_a_stall(self):
+        self.r.sim_obstacle, self.r.sim_latch = True, True
+        self.hold(0.3, 1.2)  # the first rearm is starting right now
+        t0 = time.monotonic()
+        self.assertEqual(self.r.stop().result(timeout=2), 0)
+        self.assertLess(time.monotonic() - t0, 0.3)
+        time.sleep(R.REARM_ZERO_S + 0.3)
+        after = [(n, p) for t, n, p in self.r.sent if t >= t0]
+        self.assertIn("StopMove", [n for n, _ in after])
+        self.assertFalse([p for n, p in after if n == "AvoidMove" and p["x"]], after)  # no motion after STOP
+        # deadman: release W while blocked -> StopMove once
+        self.hold(0.3, 1.2)
+        t1 = time.monotonic()
+        time.sleep(0.6)
+        self.assertEqual(self.r.names(t1).count("StopMove"), 1, self.r.names(t1))
+
+    def test_backward_is_not_delayed_by_a_stall(self):
+        self.r.sim_obstacle, self.r.sim_latch = True, True
+        self.hold(0.3, 1.2)
+        x0 = self.r.x()
+        self.hold(-0.3, 0.8)
+        self.assertLess(self.r.x(), x0 - 0.1)
+
+    def test_follow_resumes_after_the_box_is_removed(self):
+        from unittest import mock
+
+        from controller.ai import follow as F
+        from controller.ai.detector import Box
+        from controller.app import create_app
+
+        with mock.patch.multiple(F, RAISE_HOLD=0.3, STOP_HOLD=0.3, LOST_TIMEOUT=0.8, STOPPED_SHOW=0.5):
+            det = FakeDetector()
+            app, sio = create_app(self.r, detector=det, push_telemetry_task=False)
+            follow = app.extensions["go2"]["follow"]
+            c = sio.test_client(app)
+            try:
+                self.r.sim_obstacle, self.r.sim_latch = True, True
+                p = person(0.5, 0.3)  # far away, centred -> forward
+                det.set_persons([Box(p.x1, p.y1, p.x2, p.y2, p.name, p.conf, 1)])
+                c.emit("ai", {"mode": "follow", "on": True}, callback=True)
+                time.sleep(F.RAISE_HOLD + 0.25)
+                det.set_persons([p])
+                with self.assertLogs("go2", "INFO") as cm:
+                    time.sleep(1.8)
+                    self.assertLess(self.r.x(), 0.02)
+                    self.r.sim_obstacle = False
+                    end = time.monotonic() + R.REARM_GAP + R.STALL_S + 1.5
+                    while time.monotonic() < end and self.r.x() < 0.3:
+                        time.sleep(0.05)
+                    time.sleep(R.STALL_S + 0.2)
+                self.assertGreater(self.r.x(), 0.3)
+                out = "\n".join(cm.output)
+                self.assertIn("AVOID REARM #", out)
+                self.assertIn("AVOID RESUMED", out)
+                self.assert_only_filtered_motion()
+            finally:
+                follow.disable("toggle")
+                follow.close()
+                if c.is_connected():
+                    c.disconnect()
+
+    def test_no_odometry_no_rearm(self):
+        r = FakeRobot().start()
+        try:
+            r.connect().result(timeout=2)
+            r.set_avoidance(True).result(timeout=3)
+            r.clear()
+            with self.assertLogs("go2", "WARNING") as cm:
+                end = time.monotonic() + 1.6
+                while time.monotonic() < end:
+                    r.set_velocity(0.3, 0, 0)
+                    time.sleep(0.05)
+            self.assertNotIn("AvoidSwitch", r.names())
+            self.assertEqual(sum("no odometry" in m for m in cm.output), 1, cm.output)
+        finally:
+            r.close()
+
+
 class AvoidSocketTest(unittest.TestCase):
     """Real Socket.IO handlers: toggle, follow turns avoidance on, follow marked without it."""
 

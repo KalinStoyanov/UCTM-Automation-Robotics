@@ -92,6 +92,21 @@ AVOID_CMD = {
 }
 AVOID_ZERO = {"x": 0.0, "y": 0.0, "yaw": 0.0, "mode": 0}
 
+# Avoidance stall watch (robot test 2026-11-19: W held toward a box -> robot stopped, box removed,
+# W still held -> it never moved forward again; we kept sending AvoidMove x=+0.30 at 10 Hz, the
+# avoidance MOVE has no reply, and that log had no odometry, so the robot-side cause is unconfirmed).
+# Odometry = rt/lf/sportmodestate "position" (tracks real walking within ~0.2 s, robot logs 10:53).
+# A translation command that produces no motion for STALL_S is logged as AVOID STALL; while it lasts,
+# AVOID REARM (at most once per REARM_GAP) sends zero to the avoidance service for REARM_ZERO_S and
+# then re-sends the enable sequence. It never sends motion itself and never turns avoidance off,
+# so every later Move is still filtered by the robot's own service (no motion toward an obstacle).
+STALL_S = 1.0          # s of commanded translation without motion -> stall
+STALL_MIN_CMD = 0.1    # m/s: |x| or |y| at least this counts as translation (yaw-only never stalls)
+STALL_DIST = 0.06      # m: less odometry displacement than this over STALL_S = not moving
+ODOM_FRESH = 0.5       # s: odometry older than this -> no stall decisions
+REARM_GAP = 3.0        # s: at most one AVOID REARM per this
+REARM_ZERO_S = 0.3     # s of zero to the avoidance service before the enable sequence
+
 
 def label(name: str) -> str:
     return LABELS.get(name, name)
@@ -291,6 +306,16 @@ class BaseRobot:
         self._avoid_code: Any = None  # reply code of the last avoidance request
         self._avoid_error = ""
         self._avoid_lock = asyncio.Lock()
+        # avoidance stall watch / re-arm (loop-thread only, see STALL_S)
+        self._odom: collections.deque[tuple[float, float, float]] = collections.deque(maxlen=200)  # (t, x, y)
+        self._cmd_since: float | None = None   # translation commanded (same direction) since
+        self._cmd_dir: tuple[int, int] = (0, 0)
+        self._last_avoid_move_at = 0.0
+        self._stalled_at: float | None = None   # AVOID STALL episode running since
+        self._rearm_at = -REARM_GAP
+        self._rearm_count = 0                   # rearms in the current stall episode
+        self._rearming = False                  # rearm running: the control loop sends no motion
+        self._no_odom_noted = False
 
     # ---------- lifecycle ----------
     def start(self) -> "BaseRobot":
@@ -544,8 +569,10 @@ class BaseRobot:
         elif now - self._move_log_at >= 1.0:
             reply = "no reply" if self._move_last_code is None or now - self._move_last_code_at > 1.5 \
                 else f"last reply code={self._move_last_code}"
-            log.info("CMD %-12s%s -> %d sent in %.1f s, %s",
-                     name, self._fmt(param), self._move_sent, now - self._move_log_at, reply)
+            moved = self._odom_moved(now - self._move_log_at, now)
+            odom = "robot odom n/a" if moved is None else f"robot moved {moved:.2f} m"
+            log.info("CMD %-12s%s -> %d sent in %.1f s, %s, %s",
+                     name, self._fmt(param), self._move_sent, now - self._move_log_at, reply, odom)
             self._move_sent, self._move_log_at = 0, now
         self._move_burst_at = now
 
@@ -820,6 +847,127 @@ class BaseRobot:
         v = data.get("enable") if isinstance(data, dict) else None
         return bool(v) if v in (True, False, 0, 1) else None
 
+    # ---------- avoidance stall watch / re-arm ----------
+    def _on_odom(self, x: Any, y: Any) -> None:
+        """Robot position from rt/lf/sportmodestate (odometry frame, m). Loop thread."""
+        try:
+            self._odom.append((time.monotonic(), float(x), float(y)))
+        except (TypeError, ValueError):
+            pass
+
+    def _odom_moved(self, window: float, now: float) -> float | None:
+        """Odometry displacement over the last `window` s, or None without fresh odometry."""
+        if not self._odom or now - self._odom[-1][0] > ODOM_FRESH:
+            return None
+        start = None
+        for s in self._odom:
+            if s[0] >= now - window:
+                start = s
+                break
+        if start is None or start[0] - (now - window) > ODOM_FRESH:
+            return None  # no sample near the start of the window
+        last = self._odom[-1]
+        return math.hypot(last[1] - start[1], last[2] - start[2])
+
+    def _stall_reset(self, now: float, why: str) -> None:
+        self._cmd_since, self._cmd_dir = None, (0, 0)
+        if self._stalled_at is not None:
+            log.info("AVOID STALL ended (%s) after %.1f s without motion, %d rearm(s)",
+                     why, now - self._stalled_at, self._rearm_count)
+            self._stalled_at, self._rearm_count = None, 0
+
+    def _avoid_watch(self, vel: tuple[float, float, float], now: float) -> None:
+        """After every AvoidMove: commanded translation but no odometry motion -> stall / re-arm."""
+        sign = lambda v: (v >= STALL_MIN_CMD) - (v <= -STALL_MIN_CMD)  # noqa: E731
+        d = (sign(vel[0]), sign(vel[1]))
+        gap = now - self._last_avoid_move_at
+        self._last_avoid_move_at = now
+        if d == (0, 0):
+            self._stall_reset(now, "no translation")
+            return
+        if d != self._cmd_dir or self._cmd_since is None:
+            self._stall_reset(now, "new command")
+            self._cmd_since, self._cmd_dir = now, d
+            return
+        if gap > 3 * MOVE_PERIOD:  # Moves paused (rearm, posture chain): measure motion afresh
+            self._cmd_since = now
+            return
+        if now - self._cmd_since < STALL_S:
+            return
+        moved = self._odom_moved(STALL_S, now)
+        if moved is None:
+            if not self._no_odom_noted:
+                self._no_odom_noted = True
+                log.warning("AVOID stall watch: no odometry from rt/lf/sportmodestate, cannot detect a blocked robot")
+            return
+        if moved >= STALL_DIST:
+            if self._stalled_at is not None:
+                log.info("AVOID RESUMED: robot moving again (%.2f m in %.1f s) after %.1f s blocked, %d rearm(s)",
+                         moved, STALL_S, now - self._stalled_at, self._rearm_count)
+                self.events.add("Избягване: пътят е свободен, роботът продължава", "ok")
+                self._stalled_at, self._rearm_count = None, 0
+            return
+        if self._stalled_at is None:
+            self._stalled_at = now - STALL_S
+            log.warning("AVOID STALL: commanding x=%+.2f y=%+.2f yaw=%+.2f for %.1f s, robot moved %.2f m "
+                        "(obstacle in the way, or avoidance holding the stop)", *vel, now - self._cmd_since, moved)
+            self.events.add("Избягване: роботът спря пред препятствие", "warn")
+        if now - self._rearm_at >= REARM_GAP and not self._rearming:
+            self._rearm_at = now
+            self._rearm_count += 1
+            self._rearming = True
+            self._loop.create_task(self._avoid_rearm(vel, now - self._stalled_at))
+
+    def _rearm_aborted(self) -> str | None:
+        with self._lock:
+            vel = self._vel
+        if vel == (0.0, 0.0, 0.0):
+            return "command released / STOP"
+        sign = lambda v: (v >= STALL_MIN_CMD) - (v <= -STALL_MIN_CMD)  # noqa: E731
+        if (sign(vel[0]), sign(vel[1])) != self._cmd_dir:
+            return "command changed"
+        if self._damped:
+            return "Damp"
+        if not (self._avoid_route and self._avoid_want) or self._state != "connected":
+            return "avoidance off / disconnected"
+        return None
+
+    async def _avoid_rearm(self, vel: tuple[float, float, float], blocked: float) -> None:
+        """AVOID REARM: zero to the avoidance service, then the enable sequence again. Sends no motion,
+        never turns avoidance off; Moves stay on AvoidMove (filtered by the robot) the whole time."""
+        n = self._rearm_count
+        try:
+            log.warning("AVOID REARM #%d: x=%+.2f y=%+.2f commanded, no motion for %.1f s -> "
+                        "zero %.1f s, then AvoidGet + AvoidSwitch on + AvoidRemote on", n, vel[0], vel[1],
+                        blocked, REARM_ZERO_S)
+            end = time.monotonic() + REARM_ZERO_S
+            while time.monotonic() < end:
+                why = self._rearm_aborted()
+                if why:
+                    log.info("AVOID REARM #%d aborted (%s)", n, why)
+                    return
+                self._avoid_zero()
+                await asyncio.sleep(MOVE_PERIOD)
+            async with self._avoid_lock:
+                why = self._rearm_aborted()
+                if why:
+                    log.info("AVOID REARM #%d aborted (%s)", n, why)
+                    return
+                out: dict = {}
+                cg = await self._send("AvoidGet", None, ui=False, out=out)
+                enabled = self._avoid_enabled_from(out.get("reply"))
+                cs = await self._send("AvoidSwitch", {"enable": True}, ui=False)
+                cr = await self._send("AvoidRemote", {"is_remote_commands_from_api": True}, ui=False)
+            ok = cs == 0 and cr == 0
+            (log.info if ok else log.error)(
+                "AVOID REARM #%d %s: robot reported enable=%s (AvoidGet code=%s), AvoidSwitch -> %s, "
+                "AvoidRemote -> %s; Moves stay on AvoidMove", n, "done" if ok else "NOT confirmed",
+                enabled, cg, cs, cr)
+        except Exception:  # noqa: BLE001
+            log.exception("AVOID REARM #%d", n)
+        finally:
+            self._rearming = False
+
     async def _control_loop(self) -> None:
         """10 Hz movement loop. Nothing in here awaits the robot."""
         next_move = 0.0
@@ -837,11 +985,13 @@ class BaseRobot:
                     log.warning("DEADMAN: no velocity update for %.0f ms -> StopMove", DEADMAN * 1000)
                     self.events.add(f"Deadman: {DEADMAN * 1000:.0f} ms без команда → StopMove", "warn")
                 if stale or pending_stop:
+                    self._stall_reset(now, "stopped")
                     if self._moving:  # nothing to stop if no Move went out (e.g. still standing up)
                         self._send_bg("StopMove")
                     self._moving = False
                     continue
                 if vel == (0.0, 0.0, 0.0) or self._state != "connected":
+                    self._stall_reset(now, "released")
                     next_move = 0.0
                     continue
                 if self._damped:  # after АВАРИЙНО only an explicit action may stand the robot up
@@ -856,8 +1006,12 @@ class BaseRobot:
                     continue
                 if now < self._settle_until or now < next_move:
                     continue
+                if self._rearming:
+                    continue  # AVOID REARM is sending zero / the enable sequence; motion resumes after it
                 self._send_move(vel)
                 self._moving = True
+                if self._avoid_route:
+                    self._avoid_watch(vel, now)
                 next_move = now + MOVE_PERIOD if now - next_move > MOVE_PERIOD else next_move + MOVE_PERIOD
             except Exception:  # noqa: BLE001
                 log.exception("control loop")
@@ -1018,6 +1172,9 @@ class RobotSession(BaseRobot):
         d = msg.get("data") or {}
         if "error_code" in d:  # fw 1.1.12: the FSM state (1006 = trick running), "mode" stays 0
             self._telemetry["fsm"] = d["error_code"]
+        pos = d.get("position")
+        if isinstance(pos, (list, tuple)) and len(pos) >= 2:
+            self._on_odom(pos[0], pos[1])
         if "mode" in d:
             m = d["mode"]
             self._telemetry["mode_id"] = m
@@ -1042,6 +1199,16 @@ class SimRobot(BaseRobot):
         self._cap_thread: threading.Thread | None = None
         self._battery = 92.0
         self._telemetry.update(mode="Готов", mode_id=0)
+        # Obstacle model (no lidar): sim_obstacle blocks forward AvoidMove while avoidance is on.
+        # sim_latch=True also models the suspected robot-side latch (unconfirmed): once blocked, forward
+        # stays blocked after the obstacle is gone until AvoidSwitch enable is sent again.
+        self.sim_obstacle = False
+        self.sim_latch = False
+        self._sim_latched = False
+        self._sim_avoid_on = False
+        self._sim_cmd = (0.0, 0.0, 0.0)
+        self._sim_cmd_at = 0.0
+        self._sim_pose = [0.0, 0.0, 0.0]  # x, y, yaw (odometry frame)
 
     async def _open_transport(self) -> None:
         await asyncio.sleep(0.3)
@@ -1053,11 +1220,40 @@ class SimRobot(BaseRobot):
         # like a booted Go2: it reports balance stand, which the posture logic adopts
         self._telemetry.update(mode_id=1, mode=MODE_NAMES[1])
         self._on_mode(1)
+        self._loop.create_task(self._sim_odometry())
 
     async def _close_transport(self) -> None:
         self._cap_stop.set()
 
+    async def _sim_odometry(self) -> None:
+        """20 Hz position like rt/lf/sportmodestate: integrates the last motion command (0.25 s hold)."""
+        dt = 0.05
+        while self._state in ("connecting", "connected"):
+            await asyncio.sleep(dt)
+            vx, vy, vyaw = self._sim_cmd if time.monotonic() - self._sim_cmd_at <= 0.25 else (0.0, 0.0, 0.0)
+            x, y, th = self._sim_pose
+            self._sim_pose = [x + (vx * math.cos(th) - vy * math.sin(th)) * dt,
+                              y + (vx * math.sin(th) + vy * math.cos(th)) * dt, th + vyaw * dt]
+            self._on_odom(self._sim_pose[0], self._sim_pose[1])
+
+    def _sim_motion(self, name: str, param: dict | None) -> None:
+        p = param or {}
+        if name == "AvoidSwitch":
+            self._sim_avoid_on = bool(p.get("enable"))
+            if self._sim_avoid_on:
+                self._sim_latched = False
+        elif name in ("StopMove", "Damp"):
+            self._sim_cmd = (0.0, 0.0, 0.0)
+        elif name in ("Move", "AvoidMove"):
+            x, y = float(p.get("x", 0.0)), float(p.get("y", 0.0))
+            yaw = float(p.get("yaw" if name == "AvoidMove" else "z", 0.0))
+            if name == "AvoidMove" and self._sim_avoid_on and x > 0 and (self.sim_obstacle or self._sim_latched):
+                self._sim_latched = self._sim_latched or self.sim_latch
+                x = 0.0
+            self._sim_cmd, self._sim_cmd_at = (x, y, yaw), time.monotonic()
+
     def _transmit(self, name: str, param: dict | None, want_reply: bool):
+        self._sim_motion(name, param)
         m = self.SIM_MODES.get(name)
         if m is not None:
             self._telemetry.update(mode_id=m, mode=MODE_NAMES.get(m))
